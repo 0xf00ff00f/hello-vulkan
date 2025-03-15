@@ -285,21 +285,21 @@ int main()
     assert(commandPool != VK_NULL_HANDLE);
     std::cout << "*** commandPool=" << commandPool << '\n';
 
-    auto allocateCommandBuffers = [device, commandPool](uint32_t count) {
+    auto allocateCommandBuffer = [device, commandPool]() -> VkCommandBuffer {
         const auto allocateInfo = VkCommandBufferAllocateInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .commandPool = commandPool,
             .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = count,
+            .commandBufferCount = 1,
         };
 
-        std::vector<VkCommandBuffer> commandBuffers(count);
-        vkAllocateCommandBuffers(device, &allocateInfo, commandBuffers.data());
-        return commandBuffers;
+        VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+        vkAllocateCommandBuffers(device, &allocateInfo, &commandBuffer);
+        return commandBuffer;
     };
 
-    const auto commandBuffers = allocateCommandBuffers(swapchainImageCount);
-    const auto setupCommandBuffer = allocateCommandBuffers(1).front();
+    const auto commandBuffer = allocateCommandBuffer();
+    const auto setupCommandBuffer = allocateCommandBuffer();
 
     auto createFence = [device]() -> VkFence {
         const auto createInfo = VkFenceCreateInfo{
@@ -362,7 +362,7 @@ int main()
         const auto beginInfo = VkCommandBufferBeginInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
         };
-        vkBeginCommandBuffer(commandBuffers[currentBackBuffer], &beginInfo);
+        vkBeginCommandBuffer(commandBuffer, &beginInfo);
 
         const auto clearValue = VkClearValue{
             .color = { 0.0f, 1.0f, 1.0f, 1.0f }
@@ -377,12 +377,12 @@ int main()
             .clearValueCount = 1,
             .pClearValues = &clearValue,
         };
-        vkCmdBeginRenderPass(commandBuffers[currentBackBuffer], &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 
         // TODO: render impl
 
-        vkCmdEndRenderPass(commandBuffers[currentBackBuffer]);
-        vkEndCommandBuffer(commandBuffers[currentBackBuffer]);
+        vkCmdEndRenderPass(commandBuffer);
+        vkEndCommandBuffer(commandBuffer);
 
         const VkPipelineStageFlags waitDstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         const auto submitInfo = VkSubmitInfo{
@@ -391,7 +391,7 @@ int main()
             .pWaitSemaphores = &imageAcquiredSemaphore,
             .pWaitDstStageMask = &waitDstStageMask,
             .commandBufferCount = 1,
-            .pCommandBuffers = &commandBuffers[currentBackBuffer],
+            .pCommandBuffers = &commandBuffer,
             .signalSemaphoreCount = 1,
             .pSignalSemaphores = &renderingCompleteSemaphore
         };
