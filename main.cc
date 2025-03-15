@@ -20,6 +20,39 @@ std::vector<char> readFile(const char *filename)
     return buffer;
 }
 
+struct MemoryHeap {
+    enum class Flags {
+        None = 0,
+        DeviceLocal = 1,
+        HostVisible = 2,
+        HostCoherent = 4,
+        HostCached = 8,
+        LazilyAllocated = 16,
+    };
+    friend Flags operator|(Flags lhs, Flags rhs)
+    {
+        return static_cast<Flags>(static_cast<unsigned>(lhs) | static_cast<unsigned>(rhs));
+    }
+    friend Flags operator|=(Flags &lhs, Flags rhs)
+    {
+        lhs = lhs | rhs;
+        return lhs;
+    }
+    friend Flags operator&(Flags lhs, Flags rhs)
+    {
+        return static_cast<Flags>(static_cast<unsigned>(lhs) & static_cast<unsigned>(rhs));
+    }
+    friend Flags operator&=(Flags &lhs, Flags rhs)
+    {
+        lhs = lhs & rhs;
+        return lhs;
+    }
+    Flags flags = Flags::None;
+    uint64_t heapSize = 0;
+    bool heapDeviceLocal = false;
+    uint32_t typeIndex = 0;
+};
+
 } // namespace
 
 int main()
@@ -298,6 +331,10 @@ int main()
     assert(pipelineLayout != VK_NULL_HANDLE);
     std::cout << "**** pipelineLayout=" << pipelineLayout << '\n';
 
+    struct Vertex {
+        std::array<float, 2> position;
+        std::array<float, 3> color;
+    };
     const auto graphicsPipeline = [device, swapchainExtent, pipelineLayout, renderPass]() -> VkPipeline {
         const auto createShaderModule = [device](const char *filename) -> VkShaderModule {
             const auto code = readFile(filename);
@@ -334,8 +371,30 @@ int main()
                     .pName = "main" },
         };
         static_assert(std::is_same_v<decltype(shaderStages), const std::array<VkPipelineShaderStageCreateInfo, 2>>);
+        const auto vertexBindingDescription = VkVertexInputBindingDescription{
+            .binding = 0,
+            .stride = sizeof(Vertex),
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
+        };
+        const auto vertexAttributeDescriptions = std::array{
+            VkVertexInputAttributeDescription{
+                    .location = 0,
+                    .binding = vertexBindingDescription.binding,
+                    .format = VK_FORMAT_R32G32_SFLOAT,
+                    .offset = offsetof(Vertex, position) },
+            VkVertexInputAttributeDescription{
+                    .location = 1,
+                    .binding = vertexBindingDescription.binding,
+                    .format = VK_FORMAT_R32G32B32_SFLOAT,
+                    .offset = offsetof(Vertex, color) },
+        };
+        static_assert(std::is_same_v<decltype(vertexAttributeDescriptions), const std::array<VkVertexInputAttributeDescription, 2>>);
         const auto vertexInputState = VkPipelineVertexInputStateCreateInfo{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+            .vertexBindingDescriptionCount = 1,
+            .pVertexBindingDescriptions = &vertexBindingDescription,
+            .vertexAttributeDescriptionCount = vertexAttributeDescriptions.size(),
+            .pVertexAttributeDescriptions = vertexAttributeDescriptions.data()
         };
         const auto inputAssemblyState = VkPipelineInputAssemblyStateCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
@@ -417,6 +476,98 @@ int main()
     }();
     assert(graphicsPipeline != VK_NULL_HANDLE);
     std::cout << "**** graphicsPipeline=" << graphicsPipeline << '\n';
+
+    const auto vertices = std::array<Vertex, 4>{
+        Vertex{ { 0.0, -0.5 }, { 1.0, 0.0, 0.0 } },
+        Vertex{ { 0.5, 0.5 }, { 0.0, 1.0, 0.0 } },
+        Vertex{ { -0.5, 0.5 }, { 0.0, 0.0, 1.0 } },
+    };
+
+    auto createBuffer = [device](uint32_t size, VkBufferUsageFlagBits usage) {
+        const auto createInfo = VkBufferCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = size,
+            .usage = usage
+        };
+        VkBuffer buffer = VK_NULL_HANDLE;
+        vkCreateBuffer(device, &createInfo, nullptr, &buffer);
+        return buffer;
+    };
+    const auto vertexBuffer = createBuffer(sizeof(vertices), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+
+    VkMemoryRequirements memoryRequirements = {};
+    vkGetBufferMemoryRequirements(device, vertexBuffer, &memoryRequirements);
+    const auto bufferSize = memoryRequirements.size;
+
+    const auto memoryHeaps = [physicalDevice]() -> std::vector<MemoryHeap> {
+        VkPhysicalDeviceMemoryProperties memoryProperties = {};
+        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memoryProperties);
+        std::vector<MemoryHeap> memoryHeaps;
+        for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i) {
+            const auto &vkMemoryType = memoryProperties.memoryTypes[i];
+            const auto &vkMemoryHeap = memoryProperties.memoryHeaps[vkMemoryType.heapIndex];
+            MemoryHeap memoryHeap;
+            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+                memoryHeap.flags |= MemoryHeap::Flags::DeviceLocal;
+            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+                memoryHeap.flags |= MemoryHeap::Flags::HostVisible;
+            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+                memoryHeap.flags |= MemoryHeap::Flags::HostCoherent;
+            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
+                memoryHeap.flags |= MemoryHeap::Flags::HostCached;
+            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)
+                memoryHeap.flags |= MemoryHeap::Flags::LazilyAllocated;
+            memoryHeap.heapSize = vkMemoryHeap.size;
+            memoryHeap.heapDeviceLocal = vkMemoryHeap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
+            memoryHeap.typeIndex = i;
+            std::cout << "**** i=" << i << " flags=" << static_cast<uint32_t>(memoryHeap.flags) << '\n';
+            memoryHeaps.push_back(memoryHeap);
+        }
+        return memoryHeaps;
+    }();
+    struct DeviceMemory {
+        VkDeviceMemory deviceMemory = VK_NULL_HANDLE;
+        bool isHostCoherent = false;
+    };
+    const auto allocateMemory = [device, &memoryHeaps](uint32_t size) -> DeviceMemory {
+        auto it = std::ranges::find_if(memoryHeaps, [](const MemoryHeap &memoryHeap) {
+            return (memoryHeap.flags & MemoryHeap::Flags::HostVisible) == MemoryHeap::Flags::HostVisible;
+        });
+        if (it == memoryHeaps.end())
+            return {};
+        const auto &memoryHeap = *it;
+        std::cout << "**** memoryHeap.flags=" << static_cast<uint32_t>(memoryHeap.flags) << '\n';
+        const auto allocateInfo = VkMemoryAllocateInfo{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize = size,
+            .memoryTypeIndex = memoryHeap.typeIndex,
+        };
+        VkDeviceMemory deviceMemory = VK_NULL_HANDLE;
+        vkAllocateMemory(device, &allocateInfo, nullptr, &deviceMemory);
+        const auto isHostCoherent = (memoryHeap.flags & MemoryHeap::Flags::HostCoherent) == MemoryHeap::Flags::HostCoherent;
+        return { deviceMemory, isHostCoherent };
+    };
+    const auto [deviceMemory, memoryIsHostCoherent] = allocateMemory(bufferSize);
+    assert(deviceMemory != VK_NULL_HANDLE);
+    std::cout << "**** deviceMemory=" << deviceMemory << " hostCoherent=" << memoryIsHostCoherent << '\n';
+    vkBindBufferMemory(device, vertexBuffer, deviceMemory, 0);
+
+    {
+        void *mapping = nullptr;
+        vkMapMemory(device, deviceMemory, 0, VK_WHOLE_SIZE, 0, &mapping);
+        assert(mapping != nullptr);
+        std::memcpy(mapping, vertices.data(), sizeof(vertices));
+        if (!memoryIsHostCoherent) {
+            const auto mappedMemoryRange = VkMappedMemoryRange{
+                .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+                .memory = deviceMemory,
+                .offset = 0,
+                .size = VK_WHOLE_SIZE,
+            };
+            vkFlushMappedMemoryRanges(device, 1, &mappedMemoryRange);
+        }
+        vkUnmapMemory(device, deviceMemory);
+    }
 
     const auto commandPool = [graphicsQueueIndex, device]() -> VkCommandPool {
         const auto createInfo = VkCommandPoolCreateInfo{
@@ -504,6 +655,8 @@ int main()
         };
         vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        VkDeviceSize offset = 0;
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffer, &offset);
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
         vkCmdEndRenderPass(commandBuffer);
 
@@ -538,6 +691,8 @@ int main()
     vkDestroySemaphore(device, renderingCompleteSemaphore, nullptr);
     vkDestroySemaphore(device, imageAcquiredSemaphore, nullptr);
     vkDestroyFence(device, inFlightFence, nullptr);
+    vkFreeMemory(device, deviceMemory, nullptr);
+    vkDestroyBuffer(device, vertexBuffer, nullptr);
     vkDestroyPipeline(device, graphicsPipeline, nullptr);
     vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
     vkDestroyCommandPool(device, commandPool, nullptr);
