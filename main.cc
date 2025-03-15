@@ -1,11 +1,9 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
-#include <iostream>
-#include <vector>
-#include <algorithm>
+import std;
+
 #include <cassert>
-#include <array>
 
 int main()
 {
@@ -71,7 +69,6 @@ int main()
             auto it = std::ranges::find_if(properties, [](const VkQueueFamilyProperties properties) {
                 return properties.queueFlags & VK_QUEUE_GRAPHICS_BIT;
             });
-
             if (it != properties.end()) {
                 const uint32_t graphicsQueueIndex = std::distance(properties.begin(), it);
                 return { physicalDevice, graphicsQueueIndex };
@@ -237,42 +234,42 @@ int main()
     std::vector<VkImage> swapchainImages(swapchainImageCount);
     vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, swapchainImages.data());
 
-    std::vector<VkImageView> swapchainImageViews;
-    std::ranges::transform(swapchainImages, std::back_inserter(swapchainImageViews), [device, swapchainFormat](const VkImage image) -> VkImageView {
-        const auto createInfo = VkImageViewCreateInfo{
-            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            .image = image,
-            .viewType = VK_IMAGE_VIEW_TYPE_2D,
-            .format = swapchainFormat,
-            .subresourceRange = {
-                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                    .levelCount = 1,
-                    .layerCount = 1,
-            }
-        };
-        VkImageView imageView;
-        vkCreateImageView(device, &createInfo, nullptr, &imageView);
-        assert(imageView != VK_NULL_HANDLE);
-        return imageView;
-    });
+    const auto swapchainImageViews = swapchainImages | std::views::transform([device, swapchainFormat](VkImage image) -> VkImageView {
+                                         const auto createInfo = VkImageViewCreateInfo{
+                                             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                             .image = image,
+                                             .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                             .format = swapchainFormat,
+                                             .subresourceRange = {
+                                                     .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                                     .levelCount = 1,
+                                                     .layerCount = 1,
+                                             }
+                                         };
+                                         VkImageView imageView;
+                                         vkCreateImageView(device, &createInfo, nullptr, &imageView);
+                                         assert(imageView != VK_NULL_HANDLE);
+                                         return imageView;
+                                     }) |
+            std::ranges::to<std::vector<VkImageView>>();
 
-    std::vector<VkFramebuffer> swapchainFramebuffers;
-    std::ranges::transform(swapchainImageViews, std::back_inserter(swapchainFramebuffers), [device, renderPass, swapchainExtent](const VkImageView imageView) -> VkFramebuffer {
-        const auto createInfo = VkFramebufferCreateInfo{
-            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            .renderPass = renderPass,
-            .attachmentCount = 1,
-            .pAttachments = &imageView,
-            .width = swapchainExtent.width,
-            .height = swapchainExtent.height,
-            .layers = 1,
-        };
+    const auto swapchainFramebuffers = swapchainImageViews | std::views::transform([device, renderPass, swapchainExtent](const VkImageView imageView) -> VkFramebuffer {
+                                           const auto createInfo = VkFramebufferCreateInfo{
+                                               .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                                               .renderPass = renderPass,
+                                               .attachmentCount = 1,
+                                               .pAttachments = &imageView,
+                                               .width = swapchainExtent.width,
+                                               .height = swapchainExtent.height,
+                                               .layers = 1,
+                                           };
 
-        VkFramebuffer framebuffer = VK_NULL_HANDLE;
-        vkCreateFramebuffer(device, &createInfo, nullptr, &framebuffer);
-        assert(framebuffer != VK_NULL_HANDLE);
-        return framebuffer;
-    });
+                                           VkFramebuffer framebuffer = VK_NULL_HANDLE;
+                                           vkCreateFramebuffer(device, &createInfo, nullptr, &framebuffer);
+                                           assert(framebuffer != VK_NULL_HANDLE);
+                                           return framebuffer;
+                                       }) |
+            std::ranges::to<std::vector<VkFramebuffer>>();
 
     const auto commandPool = [graphicsQueueIndex, device]() -> VkCommandPool {
         const auto createInfo = VkCommandPoolCreateInfo{
@@ -304,19 +301,6 @@ int main()
     const auto commandBuffers = allocateCommandBuffers(swapchainImageCount);
     const auto setupCommandBuffer = allocateCommandBuffers(1).front();
 
-#if 0
-    std::vector<VkFence> frameFences(swapchainImageCount);
-    std::ranges::generate_n(frameFences.begin(), frameFences.size(), [device] {
-        const auto createInfo = VkFenceCreateInfo {
-            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-            .flags = VK_FENCE_CREATE_SIGNALED_BIT, // so we can wait for them on the first try
-        };
-        VkFence fence = VK_NULL_HANDLE;
-        vkCreateFence(device, &createInfo, nullptr, &fence);
-        assert(fence != VK_NULL_HANDLE);
-        return fence;
-    });
-#else
     auto createFence = [device]() -> VkFence {
         const auto createInfo = VkFenceCreateInfo{
             .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
@@ -329,8 +313,8 @@ int main()
     };
     auto inFlightFence = createFence();
     std::cout << "**** inFlightFence=" << inFlightFence << '\n';
-#endif
 
+#if 0
     // initial setup
     vkResetFences(device, 1, &inFlightFence);
     {
@@ -349,6 +333,7 @@ int main()
         vkQueueSubmit(queue, 1, &submitInfo, inFlightFence);
     }
     vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
+#endif
 
     const auto createSemaphore = [device]() -> VkSemaphore {
         const auto createInfo = VkSemaphoreCreateInfo{
