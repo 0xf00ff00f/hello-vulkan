@@ -280,7 +280,6 @@ int main()
                                                .height = swapchainExtent.height,
                                                .layers = 1,
                                            };
-
                                            VkFramebuffer framebuffer = VK_NULL_HANDLE;
                                            vkCreateFramebuffer(device, &createInfo, nullptr, &framebuffer);
                                            assert(framebuffer != VK_NULL_HANDLE);
@@ -447,7 +446,6 @@ int main()
     };
 
     const auto commandBuffer = allocateCommandBuffer();
-    const auto setupCommandBuffer = allocateCommandBuffer();
 
     auto createFence = [device]() -> VkFence {
         const auto createInfo = VkFenceCreateInfo{
@@ -461,27 +459,6 @@ int main()
     };
     auto inFlightFence = createFence();
     std::cout << "**** inFlightFence=" << inFlightFence << '\n';
-
-#if 0
-    // initial setup
-    vkResetFences(device, 1, &inFlightFence);
-    {
-        const auto beginInfo = VkCommandBufferBeginInfo{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
-        };
-        vkBeginCommandBuffer(setupCommandBuffer, &beginInfo);
-        // TODO: initialize impl
-        vkEndCommandBuffer(setupCommandBuffer);
-
-        const auto submitInfo = VkSubmitInfo{
-            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .commandBufferCount = 1,
-            .pCommandBuffers = &setupCommandBuffer,
-        };
-        vkQueueSubmit(queue, 1, &submitInfo, inFlightFence);
-    }
-    vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
-#endif
 
     const auto createSemaphore = [device]() -> VkSemaphore {
         const auto createInfo = VkSemaphoreCreateInfo{
