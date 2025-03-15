@@ -5,6 +5,23 @@ import std;
 
 #include <cassert>
 
+namespace {
+
+std::vector<char> readFile(const char *filename)
+{
+    std::ifstream file(filename, std::ios::ate | std::ios::binary);
+    if (!file.is_open())
+        return {};
+    const auto size = static_cast<size_t>(file.tellg());
+    std::vector<char> buffer(size);
+    file.seekg(0);
+    file.read(buffer.data(), buffer.size());
+    file.close();
+    return buffer;
+}
+
+} // namespace
+
 int main()
 {
     glfwInit();
@@ -271,6 +288,137 @@ int main()
                                        }) |
             std::ranges::to<std::vector<VkFramebuffer>>();
 
+    const auto pipelineLayout = [device]() -> VkPipelineLayout {
+        const auto createInfo = VkPipelineLayoutCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
+        };
+        VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+        vkCreatePipelineLayout(device, &createInfo, nullptr, &pipelineLayout);
+        return pipelineLayout;
+    }();
+    assert(pipelineLayout != VK_NULL_HANDLE);
+    std::cout << "**** pipelineLayout=" << pipelineLayout << '\n';
+
+    const auto graphicsPipeline = [device, swapchainExtent, pipelineLayout, renderPass]() -> VkPipeline {
+        const auto createShaderModule = [device](const char *filename) -> VkShaderModule {
+            const auto code = readFile(filename);
+            if (code.empty())
+                return VK_NULL_HANDLE;
+
+            const auto createInfo = VkShaderModuleCreateInfo{
+                .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                .codeSize = code.size(),
+                .pCode = reinterpret_cast<const uint32_t *>(code.data())
+            };
+            VkShaderModule shaderModule;
+            vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule);
+            return shaderModule;
+        };
+        auto vertShaderModule = createShaderModule("shaders/simple.vert.spv");
+        assert(vertShaderModule != VK_NULL_HANDLE);
+        std::cout << "**** vertShadeModule=" << vertShaderModule << '\n';
+
+        auto fragShaderModule = createShaderModule("shaders/simple.frag.spv");
+        assert(fragShaderModule != VK_NULL_HANDLE);
+        std::cout << "**** fragShaderModule=" << fragShaderModule << '\n';
+
+        const auto shaderStages = std::array{
+            VkPipelineShaderStageCreateInfo{
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                    .stage = VK_SHADER_STAGE_VERTEX_BIT,
+                    .module = vertShaderModule,
+                    .pName = "main" },
+            VkPipelineShaderStageCreateInfo{
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                    .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+                    .module = fragShaderModule,
+                    .pName = "main" },
+        };
+        static_assert(std::is_same_v<decltype(shaderStages), const std::array<VkPipelineShaderStageCreateInfo, 2>>);
+        const auto vertexInputState = VkPipelineVertexInputStateCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
+        };
+        const auto inputAssemblyState = VkPipelineInputAssemblyStateCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+            .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            .primitiveRestartEnable = VK_FALSE
+        };
+        const auto viewport = VkViewport{
+            .x = 0.0f,
+            .y = 0.0f,
+            .width = static_cast<float>(swapchainExtent.width),
+            .height = static_cast<float>(swapchainExtent.height),
+            .minDepth = 0.0f,
+            .maxDepth = 1.0f,
+        };
+        const auto scissor = VkRect2D{
+            .offset = VkOffset2D{ .x = 0, .y = 0 },
+            .extent = swapchainExtent
+        };
+        const auto viewportState = VkPipelineViewportStateCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+            .viewportCount = 1,
+            .pViewports = &viewport,
+            .scissorCount = 1,
+            .pScissors = &scissor
+        };
+        const auto rasterizationState = VkPipelineRasterizationStateCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+            .depthClampEnable = VK_FALSE,
+            .lineWidth = 1.0f
+        };
+        const auto multisampleState = VkPipelineMultisampleStateCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+            .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+            .sampleShadingEnable = VK_FALSE,
+            .minSampleShading = 1.0f,
+            .pSampleMask = nullptr,
+            .alphaToCoverageEnable = VK_FALSE,
+            .alphaToOneEnable = VK_FALSE
+        };
+        const auto colorBlendAttachment = VkPipelineColorBlendAttachmentState{
+            .blendEnable = VK_FALSE,
+            .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .colorBlendOp = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp = VK_BLEND_OP_ADD,
+            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        };
+        const auto colorBlendState = VkPipelineColorBlendStateCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            .logicOpEnable = VK_FALSE,
+            .logicOp = VK_LOGIC_OP_COPY,
+            .attachmentCount = 1,
+            .pAttachments = &colorBlendAttachment,
+            .blendConstants = { 0.0f, 0.0f, 0.0f, 0.0f }
+        };
+        const auto createInfo = VkGraphicsPipelineCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .stageCount = static_cast<uint32_t>(shaderStages.size()),
+            .pStages = shaderStages.data(),
+            .pVertexInputState = &vertexInputState,
+            .pInputAssemblyState = &inputAssemblyState,
+            .pViewportState = &viewportState,
+            .pRasterizationState = &rasterizationState,
+            .pMultisampleState = &multisampleState,
+            .pColorBlendState = &colorBlendState,
+            .layout = pipelineLayout,
+            .renderPass = renderPass
+        };
+
+        VkPipeline graphicsPipeline = VK_NULL_HANDLE;
+        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &createInfo, nullptr, &graphicsPipeline);
+
+        vkDestroyShaderModule(device, fragShaderModule, nullptr);
+        vkDestroyShaderModule(device, vertShaderModule, nullptr);
+
+        return graphicsPipeline;
+    }();
+    assert(graphicsPipeline != VK_NULL_HANDLE);
+    std::cout << "**** graphicsPipeline=" << graphicsPipeline << '\n';
+
     const auto commandPool = [graphicsQueueIndex, device]() -> VkCommandPool {
         const auto createInfo = VkCommandPoolCreateInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -378,10 +526,10 @@ int main()
             .pClearValues = &clearValue,
         };
         vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
-
-        // TODO: render impl
-
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
         vkCmdEndRenderPass(commandBuffer);
+
         vkEndCommandBuffer(commandBuffer);
 
         const VkPipelineStageFlags waitDstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -413,6 +561,8 @@ int main()
     vkDestroySemaphore(device, renderingCompleteSemaphore, nullptr);
     vkDestroySemaphore(device, imageAcquiredSemaphore, nullptr);
     vkDestroyFence(device, inFlightFence, nullptr);
+    vkDestroyPipeline(device, graphicsPipeline, nullptr);
+    vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
     vkDestroyCommandPool(device, commandPool, nullptr);
     for (auto framebuffer : swapchainFramebuffers)
         vkDestroyFramebuffer(device, framebuffer, nullptr);
