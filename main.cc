@@ -55,6 +55,16 @@ struct MemoryHeap {
 
 } // namespace
 
+#define VK_CHECK(expr)                                           \
+    do {                                                         \
+        static_assert(std::is_same_v<decltype(expr), VkResult>); \
+        const auto result = (expr);                              \
+        if (result != VK_SUCCESS) {                              \
+            std::cerr << "Vulkan error: " << result << '\n';     \
+            std::abort();                                        \
+        }                                                        \
+    } while (false)
+
 int main()
 {
     glfwInit();
@@ -88,7 +98,7 @@ int main()
         };
 
         VkInstance instance = VK_NULL_HANDLE;
-        vkCreateInstance(&createInfo, nullptr, &instance);
+        VK_CHECK(vkCreateInstance(&createInfo, nullptr, &instance));
         return instance;
     }();
     std::cout << "*** instance=" << instance << '\n';
@@ -96,10 +106,10 @@ int main()
     // find physical device with graphics queue
     const auto [physicalDevice, graphicsQueueIndex] = [instance]() -> std::tuple<VkPhysicalDevice, uint32_t> {
         uint32_t count = 0;
-        vkEnumeratePhysicalDevices(instance, &count, nullptr);
+        VK_CHECK(vkEnumeratePhysicalDevices(instance, &count, nullptr));
 
         std::vector<VkPhysicalDevice> physicalDevices(count);
-        vkEnumeratePhysicalDevices(instance, &count, physicalDevices.data());
+        VK_CHECK(vkEnumeratePhysicalDevices(instance, &count, physicalDevices.data()));
 
         for (const auto &physicalDevice : physicalDevices) {
             const auto usable = [physicalDevice] {
@@ -153,15 +163,13 @@ int main()
         };
 
         VkDevice device = VK_NULL_HANDLE;
-        vkCreateDevice(physicalDevice, &createInfo, nullptr, &device);
+        VK_CHECK(vkCreateDevice(physicalDevice, &createInfo, nullptr, &device));
 
         VkQueue queue = VK_NULL_HANDLE;
         vkGetDeviceQueue(device, graphicsQueueIndex, 0, &queue);
 
         return { device, queue };
     }();
-    assert(device != VK_NULL_HANDLE);
-    assert(queue != VK_NULL_HANDLE);
     std::cout << "*** device=" << device << " queue=" << queue << '\n';
 
     VkSurfaceKHR surface = VK_NULL_HANDLE;
@@ -169,20 +177,20 @@ int main()
     assert(result == VK_SUCCESS);
 
     VkBool32 presentSupported = VK_FALSE;
-    vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, 0, surface, &presentSupported);
+    VK_CHECK(vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, 0, surface, &presentSupported));
     assert(presentSupported == VK_TRUE);
 
     constexpr auto QueueSlotCount = 3;
 
     const auto [swapchain, swapchainExtent, swapchainFormat] = [physicalDevice, surface, device]() -> std::tuple<VkSwapchainKHR, VkExtent2D, VkFormat> {
         VkSurfaceCapabilitiesKHR surfaceCapabilities = {};
-        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCapabilities);
+        VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCapabilities));
 
-        uint32_t presentModeCount;
-        vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &presentModeCount, nullptr);
+        uint32_t presentModeCount = 0;
+        VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &presentModeCount, nullptr));
 
         std::vector<VkPresentModeKHR> presentModes(presentModeCount);
-        vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &presentModeCount, presentModes.data());
+        VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &presentModeCount, presentModes.data()));
 
         const VkExtent2D extent = surfaceCapabilities.currentExtent;
 
@@ -197,10 +205,10 @@ int main()
 
         const auto [format, colorSpace] = [physicalDevice, surface]() -> std::tuple<VkFormat, VkColorSpaceKHR> {
             uint32_t count = 0;
-            vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, nullptr);
+            VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, nullptr));
 
             std::vector<VkSurfaceFormatKHR> formats(count);
-            vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, formats.data());
+            VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, formats.data()));
 
             for (const auto &format : formats)
                 std::cout << "format=" << format.format << " colorSpace=" << format.colorSpace << '\n';
@@ -231,11 +239,10 @@ int main()
         };
 
         VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-        vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapchain);
+        VK_CHECK(vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapchain));
 
         return { swapchain, extent, format };
     }();
-    assert(swapchain != VK_NULL_HANDLE);
     std::cout << "*** swapchain=" << swapchain << " format=" << swapchainFormat << " extent=" << swapchainExtent.width << 'x' << swapchainExtent.height << '\n';
 
     const auto renderPass = [device, swapchainFormat]() -> VkRenderPass {
@@ -271,18 +278,17 @@ int main()
         };
 
         VkRenderPass renderPass = VK_NULL_HANDLE;
-        vkCreateRenderPass(device, &createInfo, nullptr, &renderPass);
+        VK_CHECK(vkCreateRenderPass(device, &createInfo, nullptr, &renderPass));
         return renderPass;
     }();
-    assert(renderPass != VK_NULL_HANDLE);
     std::cout << "*** renderPass=" << renderPass << '\n';
 
     uint32_t swapchainImageCount = 0;
-    vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, nullptr);
+    VK_CHECK(vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, nullptr));
     assert(swapchainImageCount == QueueSlotCount);
 
     std::vector<VkImage> swapchainImages(swapchainImageCount);
-    vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, swapchainImages.data());
+    VK_CHECK(vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, swapchainImages.data()));
 
     const auto swapchainImageViews = swapchainImages | std::views::transform([device, swapchainFormat](VkImage image) -> VkImageView {
                                          const auto createInfo = VkImageViewCreateInfo{
@@ -296,9 +302,8 @@ int main()
                                                      .layerCount = 1,
                                              }
                                          };
-                                         VkImageView imageView;
-                                         vkCreateImageView(device, &createInfo, nullptr, &imageView);
-                                         assert(imageView != VK_NULL_HANDLE);
+                                         VkImageView imageView = VK_NULL_HANDLE;
+                                         VK_CHECK(vkCreateImageView(device, &createInfo, nullptr, &imageView));
                                          return imageView;
                                      }) |
             std::ranges::to<std::vector<VkImageView>>();
@@ -314,8 +319,7 @@ int main()
                                                .layers = 1,
                                            };
                                            VkFramebuffer framebuffer = VK_NULL_HANDLE;
-                                           vkCreateFramebuffer(device, &createInfo, nullptr, &framebuffer);
-                                           assert(framebuffer != VK_NULL_HANDLE);
+                                           VK_CHECK(vkCreateFramebuffer(device, &createInfo, nullptr, &framebuffer));
                                            return framebuffer;
                                        }) |
             std::ranges::to<std::vector<VkFramebuffer>>();
@@ -325,10 +329,9 @@ int main()
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
         };
         VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-        vkCreatePipelineLayout(device, &createInfo, nullptr, &pipelineLayout);
+        VK_CHECK(vkCreatePipelineLayout(device, &createInfo, nullptr, &pipelineLayout));
         return pipelineLayout;
     }();
-    assert(pipelineLayout != VK_NULL_HANDLE);
     std::cout << "**** pipelineLayout=" << pipelineLayout << '\n';
 
     struct Vertex {
@@ -346,16 +349,14 @@ int main()
                 .codeSize = code.size(),
                 .pCode = reinterpret_cast<const uint32_t *>(code.data())
             };
-            VkShaderModule shaderModule;
-            vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule);
+            VkShaderModule shaderModule = VK_NULL_HANDLE;
+            VK_CHECK(vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule));
             return shaderModule;
         };
         auto vertShaderModule = createShaderModule("shaders/simple.vert.spv");
-        assert(vertShaderModule != VK_NULL_HANDLE);
         std::cout << "**** vertShadeModule=" << vertShaderModule << '\n';
 
         auto fragShaderModule = createShaderModule("shaders/simple.frag.spv");
-        assert(fragShaderModule != VK_NULL_HANDLE);
         std::cout << "**** fragShaderModule=" << fragShaderModule << '\n';
 
         const auto shaderStages = std::array{
@@ -467,14 +468,13 @@ int main()
         };
 
         VkPipeline graphicsPipeline = VK_NULL_HANDLE;
-        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &createInfo, nullptr, &graphicsPipeline);
+        VK_CHECK(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &createInfo, nullptr, &graphicsPipeline));
 
         vkDestroyShaderModule(device, fragShaderModule, nullptr);
         vkDestroyShaderModule(device, vertShaderModule, nullptr);
 
         return graphicsPipeline;
     }();
-    assert(graphicsPipeline != VK_NULL_HANDLE);
     std::cout << "**** graphicsPipeline=" << graphicsPipeline << '\n';
 
     const auto vertices = std::array<Vertex, 4>{
@@ -490,7 +490,7 @@ int main()
             .usage = usage
         };
         VkBuffer buffer = VK_NULL_HANDLE;
-        vkCreateBuffer(device, &createInfo, nullptr, &buffer);
+        VK_CHECK(vkCreateBuffer(device, &createInfo, nullptr, &buffer));
         return buffer;
     };
     const auto vertexBuffer = createBuffer(sizeof(vertices), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
@@ -543,18 +543,17 @@ int main()
             .memoryTypeIndex = memoryHeap.typeIndex,
         };
         VkDeviceMemory deviceMemory = VK_NULL_HANDLE;
-        vkAllocateMemory(device, &allocateInfo, nullptr, &deviceMemory);
+        VK_CHECK(vkAllocateMemory(device, &allocateInfo, nullptr, &deviceMemory));
         const auto isHostCoherent = (memoryHeap.flags & MemoryHeap::Flags::HostCoherent) == MemoryHeap::Flags::HostCoherent;
         return { deviceMemory, isHostCoherent };
     };
     const auto [deviceMemory, memoryIsHostCoherent] = allocateMemory(bufferSize);
-    assert(deviceMemory != VK_NULL_HANDLE);
     std::cout << "**** deviceMemory=" << deviceMemory << " hostCoherent=" << memoryIsHostCoherent << '\n';
-    vkBindBufferMemory(device, vertexBuffer, deviceMemory, 0);
+    VK_CHECK(vkBindBufferMemory(device, vertexBuffer, deviceMemory, 0));
 
     {
         void *mapping = nullptr;
-        vkMapMemory(device, deviceMemory, 0, VK_WHOLE_SIZE, 0, &mapping);
+        VK_CHECK(vkMapMemory(device, deviceMemory, 0, VK_WHOLE_SIZE, 0, &mapping));
         assert(mapping != nullptr);
         std::memcpy(mapping, vertices.data(), sizeof(vertices));
         if (!memoryIsHostCoherent) {
@@ -564,7 +563,7 @@ int main()
                 .offset = 0,
                 .size = VK_WHOLE_SIZE,
             };
-            vkFlushMappedMemoryRanges(device, 1, &mappedMemoryRange);
+            VK_CHECK(vkFlushMappedMemoryRanges(device, 1, &mappedMemoryRange));
         }
         vkUnmapMemory(device, deviceMemory);
     }
@@ -577,10 +576,9 @@ int main()
         };
 
         VkCommandPool commandPool = VK_NULL_HANDLE;
-        vkCreateCommandPool(device, &createInfo, nullptr, &commandPool);
+        VK_CHECK(vkCreateCommandPool(device, &createInfo, nullptr, &commandPool));
         return commandPool;
     }();
-    assert(commandPool != VK_NULL_HANDLE);
     std::cout << "*** commandPool=" << commandPool << '\n';
 
     auto allocateCommandBuffer = [device, commandPool]() -> VkCommandBuffer {
@@ -592,7 +590,7 @@ int main()
         };
 
         VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-        vkAllocateCommandBuffers(device, &allocateInfo, &commandBuffer);
+        VK_CHECK(vkAllocateCommandBuffers(device, &allocateInfo, &commandBuffer));
         return commandBuffer;
     };
 
@@ -604,8 +602,7 @@ int main()
             .flags = VK_FENCE_CREATE_SIGNALED_BIT, // so we can wait for them on the first try
         };
         VkFence fence = VK_NULL_HANDLE;
-        vkCreateFence(device, &createInfo, nullptr, &fence);
-        assert(fence != VK_NULL_HANDLE);
+        VK_CHECK(vkCreateFence(device, &createInfo, nullptr, &fence));
         return fence;
     };
     auto inFlightFence = createFence();
@@ -616,7 +613,7 @@ int main()
             .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
         };
         VkSemaphore semaphore = VK_NULL_HANDLE;
-        vkCreateSemaphore(device, &createInfo, nullptr, &semaphore);
+        VK_CHECK(vkCreateSemaphore(device, &createInfo, nullptr, &semaphore));
         return semaphore;
     };
     auto imageAcquiredSemaphore = createSemaphore();
@@ -628,17 +625,17 @@ int main()
         glfwPollEvents();
 
         // wait for previous frame to finish
-        vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
-        vkResetFences(device, 1, &inFlightFence);
+        VK_CHECK(vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX));
+        VK_CHECK(vkResetFences(device, 1, &inFlightFence));
 
         uint32_t currentBackBuffer = uint32_t(-1);
-        vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAcquiredSemaphore, VK_NULL_HANDLE, &currentBackBuffer);
+        VK_CHECK(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAcquiredSemaphore, VK_NULL_HANDLE, &currentBackBuffer));
         std::cout << "**** after vkAcquireNextImageKHR currentBackBuffer=" << currentBackBuffer << '\n';
 
         const auto beginInfo = VkCommandBufferBeginInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
         };
-        vkBeginCommandBuffer(commandBuffer, &beginInfo);
+        VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
 
         const auto clearValue = VkClearValue{
             .color = { 0.0f, 1.0f, 1.0f, 1.0f }
@@ -660,7 +657,7 @@ int main()
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
         vkCmdEndRenderPass(commandBuffer);
 
-        vkEndCommandBuffer(commandBuffer);
+        VK_CHECK(vkEndCommandBuffer(commandBuffer));
 
         const VkPipelineStageFlags waitDstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         const auto submitInfo = VkSubmitInfo{
@@ -673,7 +670,7 @@ int main()
             .signalSemaphoreCount = 1,
             .pSignalSemaphores = &renderingCompleteSemaphore
         };
-        vkQueueSubmit(queue, 1, &submitInfo, inFlightFence);
+        VK_CHECK(vkQueueSubmit(queue, 1, &submitInfo, inFlightFence));
 
         const auto presentInfo = VkPresentInfoKHR{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
@@ -683,10 +680,10 @@ int main()
             .pSwapchains = &swapchain,
             .pImageIndices = &currentBackBuffer
         };
-        vkQueuePresentKHR(queue, &presentInfo);
+        VK_CHECK(vkQueuePresentKHR(queue, &presentInfo));
     }
 
-    vkDeviceWaitIdle(device);
+    VK_CHECK(vkDeviceWaitIdle(device));
 
     vkDestroySemaphore(device, renderingCompleteSemaphore, nullptr);
     vkDestroySemaphore(device, imageAcquiredSemaphore, nullptr);
@@ -705,6 +702,7 @@ int main()
     vkDestroySurfaceKHR(instance, surface, nullptr);
     vkDestroyDevice(device, nullptr);
     vkDestroyInstance(instance, nullptr);
+
     glfwDestroyWindow(window);
     glfwTerminate();
 }
