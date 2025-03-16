@@ -1,6 +1,9 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
+#define VMA_IMPLEMENTATION
+#include <vk_mem_alloc.h>
+
 import std;
 
 #include <cassert>
@@ -19,39 +22,6 @@ std::vector<char> readFile(const char *filename)
     file.close();
     return buffer;
 }
-
-struct MemoryHeap {
-    enum class Flags {
-        None = 0,
-        DeviceLocal = 1,
-        HostVisible = 2,
-        HostCoherent = 4,
-        HostCached = 8,
-        LazilyAllocated = 16,
-    };
-    friend Flags operator|(Flags lhs, Flags rhs)
-    {
-        return static_cast<Flags>(static_cast<unsigned>(lhs) | static_cast<unsigned>(rhs));
-    }
-    friend Flags operator|=(Flags &lhs, Flags rhs)
-    {
-        lhs = lhs | rhs;
-        return lhs;
-    }
-    friend Flags operator&(Flags lhs, Flags rhs)
-    {
-        return static_cast<Flags>(static_cast<unsigned>(lhs) & static_cast<unsigned>(rhs));
-    }
-    friend Flags operator&=(Flags &lhs, Flags rhs)
-    {
-        lhs = lhs & rhs;
-        return lhs;
-    }
-    Flags flags = Flags::None;
-    uint64_t heapSize = 0;
-    bool heapDeviceLocal = false;
-    uint32_t typeIndex = 0;
-};
 
 } // namespace
 
@@ -81,21 +51,26 @@ private:
         bool isHostCoherent = false;
     };
 
+    struct Buffer {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+    };
+
     void initialize();
     void cleanup();
 
     VkShaderModule createShaderModule(const char *filename) const;
-    DeviceMemory allocateMemory(VkDeviceSize size) const;
     VkCommandBuffer allocateCommandBuffer() const;
     VkFence createFence(bool createSignaled = true) const;
     VkSemaphore createSemaphore() const;
+    Buffer allocateBuffer(VkDeviceSize size, VkBufferUsageFlagBits usage) const;
 
     GLFWwindow *m_window = nullptr;
     VkInstance m_instance = VK_NULL_HANDLE;
     VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
     uint32_t m_graphicsQueueIndex = uint32_t(-1);
-    std::vector<MemoryHeap> m_memoryHeaps;
     VkDevice m_device = VK_NULL_HANDLE;
+    VmaAllocator m_allocator = VK_NULL_HANDLE;
     VkQueue m_queue = VK_NULL_HANDLE;
     VkSurfaceKHR m_surface = VK_NULL_HANDLE;
     VkSwapchainKHR m_swapchain;
@@ -107,8 +82,7 @@ private:
     std::vector<VkFramebuffer> m_swapchainFramebuffers;
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
-    VkBuffer m_vertexBuffer = VK_NULL_HANDLE;
-    DeviceMemory m_deviceMemory;
+    Buffer m_vertexBuffer;
     VkCommandPool m_commandPool = VK_NULL_HANDLE;
     VkCommandBuffer m_commandBuffer = VK_NULL_HANDLE;
     VkFence m_inFlightFence = VK_NULL_HANDLE;
@@ -203,35 +177,8 @@ void HelloVulkan::initialize()
     assert(m_graphicsQueueIndex != uint32_t(-1));
     std::cout << "*** physicalDevice=" << m_physicalDevice << " graphicsQueueIndex=" << m_graphicsQueueIndex << '\n';
 
-    m_memoryHeaps = [this]() -> std::vector<MemoryHeap> {
-        VkPhysicalDeviceMemoryProperties memoryProperties = {};
-        vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memoryProperties);
-        std::vector<MemoryHeap> memoryHeaps;
-        for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i) {
-            const auto &vkMemoryType = memoryProperties.memoryTypes[i];
-            const auto &vkMemoryHeap = memoryProperties.memoryHeaps[vkMemoryType.heapIndex];
-            MemoryHeap memoryHeap;
-            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-                memoryHeap.flags |= MemoryHeap::Flags::DeviceLocal;
-            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
-                memoryHeap.flags |= MemoryHeap::Flags::HostVisible;
-            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-                memoryHeap.flags |= MemoryHeap::Flags::HostCoherent;
-            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
-                memoryHeap.flags |= MemoryHeap::Flags::HostCached;
-            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)
-                memoryHeap.flags |= MemoryHeap::Flags::LazilyAllocated;
-            memoryHeap.heapSize = vkMemoryHeap.size;
-            memoryHeap.heapDeviceLocal = vkMemoryHeap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
-            memoryHeap.typeIndex = i;
-            std::cout << "**** i=" << i << " flags=" << static_cast<uint32_t>(memoryHeap.flags) << '\n';
-            memoryHeaps.push_back(memoryHeap);
-        }
-        return memoryHeaps;
-    }();
-
     // create logical device
-    std::tie(m_device, m_queue) = [this]() -> std::tuple<VkDevice, VkQueue> {
+    m_device = [this]() -> VkDevice {
         const std::vector<const char *> deviceExtensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
         const auto queuePriority = 1.0f;
@@ -253,13 +200,31 @@ void HelloVulkan::initialize()
 
         VkDevice device = VK_NULL_HANDLE;
         VK_CHECK(vkCreateDevice(m_physicalDevice, &createInfo, nullptr, &device));
-
-        VkQueue queue = VK_NULL_HANDLE;
-        vkGetDeviceQueue(device, m_graphicsQueueIndex, 0, &queue);
-
-        return { device, queue };
+        return device;
     }();
-    std::cout << "*** device=" << m_device << " queue=" << m_queue << '\n';
+    std::cout << "*** device=" << m_device << '\n';
+
+    m_allocator = [this]() -> VmaAllocator {
+        const auto vulkanFunctions = VmaVulkanFunctions{
+            .vkGetInstanceProcAddr = &vkGetInstanceProcAddr,
+            .vkGetDeviceProcAddr = &vkGetDeviceProcAddr
+        };
+        const auto createInfo = VmaAllocatorCreateInfo{
+            .flags = VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT,
+            .physicalDevice = m_physicalDevice,
+            .device = m_device,
+            .pVulkanFunctions = &vulkanFunctions,
+            .instance = m_instance,
+            .vulkanApiVersion = VK_API_VERSION_1_0,
+        };
+        VmaAllocator allocator = VK_NULL_HANDLE;
+        VK_CHECK(vmaCreateAllocator(&createInfo, &allocator));
+        return allocator;
+    }();
+    std::cout << "*** allocator=" << m_allocator << '\n';
+
+    vkGetDeviceQueue(m_device, m_graphicsQueueIndex, 0, &m_queue);
+    std::cout << "*** queue=" << m_queue << '\n';
 
     VK_CHECK(glfwCreateWindowSurface(m_instance, m_window, nullptr, &m_surface));
 
@@ -554,43 +519,10 @@ void HelloVulkan::initialize()
         Vertex{ { -0.5, 0.5 }, { 0.0, 0.0, 1.0 } },
     };
 
-    auto createBuffer = [this](uint32_t size, VkBufferUsageFlagBits usage) {
-        const auto createInfo = VkBufferCreateInfo{
-            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size = size,
-            .usage = usage
-        };
-        VkBuffer buffer = VK_NULL_HANDLE;
-        VK_CHECK(vkCreateBuffer(m_device, &createInfo, nullptr, &buffer));
-        return buffer;
-    };
-    m_vertexBuffer = createBuffer(sizeof(vertices), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    const auto verticesBytes = std::as_bytes(std::span{ vertices });
 
-    VkMemoryRequirements memoryRequirements = {};
-    vkGetBufferMemoryRequirements(m_device, m_vertexBuffer, &memoryRequirements);
-    const auto bufferSize = memoryRequirements.size;
-
-    m_deviceMemory = allocateMemory(bufferSize);
-    assert(m_deviceMemory.memory != VK_NULL_HANDLE);
-    std::cout << "**** deviceMemory=" << m_deviceMemory.memory << " hostCoherent=" << m_deviceMemory.isHostCoherent << '\n';
-    VK_CHECK(vkBindBufferMemory(m_device, m_vertexBuffer, m_deviceMemory.memory, 0));
-
-    {
-        void *mapping = nullptr;
-        VK_CHECK(vkMapMemory(m_device, m_deviceMemory.memory, 0, VK_WHOLE_SIZE, 0, &mapping));
-        assert(mapping != nullptr);
-        std::memcpy(mapping, vertices.data(), sizeof(vertices));
-        if (!m_deviceMemory.isHostCoherent) {
-            const auto mappedMemoryRange = VkMappedMemoryRange{
-                .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
-                .memory = m_deviceMemory.memory,
-                .offset = 0,
-                .size = VK_WHOLE_SIZE,
-            };
-            VK_CHECK(vkFlushMappedMemoryRanges(m_device, 1, &mappedMemoryRange));
-        }
-        vkUnmapMemory(m_device, m_deviceMemory.memory);
-    }
+    m_vertexBuffer = allocateBuffer(verticesBytes.size(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    vmaCopyMemoryToAllocation(m_allocator, verticesBytes.data(), m_vertexBuffer.allocation, 0, verticesBytes.size());
 
     m_commandPool = [this]() -> VkCommandPool {
         const auto createInfo = VkCommandPoolCreateInfo{
@@ -650,7 +582,7 @@ void HelloVulkan::run()
         vkCmdBeginRenderPass(m_commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
         vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
         VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(m_commandBuffer, 0, 1, &m_vertexBuffer, &offset);
+        vkCmdBindVertexBuffers(m_commandBuffer, 0, 1, &m_vertexBuffer.buffer, &offset);
         vkCmdDraw(m_commandBuffer, 3, 1, 0, 0);
         vkCmdEndRenderPass(m_commandBuffer);
 
@@ -688,8 +620,7 @@ void HelloVulkan::cleanup()
     vkDestroySemaphore(m_device, m_renderingCompleteSemaphore, nullptr);
     vkDestroySemaphore(m_device, m_imageAcquiredSemaphore, nullptr);
     vkDestroyFence(m_device, m_inFlightFence, nullptr);
-    vkFreeMemory(m_device, m_deviceMemory.memory, nullptr);
-    vkDestroyBuffer(m_device, m_vertexBuffer, nullptr);
+    vmaDestroyBuffer(m_allocator, m_vertexBuffer.buffer, m_vertexBuffer.allocation);
     vkDestroyPipeline(m_device, m_pipeline, nullptr);
     vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
     vkDestroyCommandPool(m_device, m_commandPool, nullptr);
@@ -700,6 +631,7 @@ void HelloVulkan::cleanup()
     vkDestroyRenderPass(m_device, m_renderPass, nullptr);
     vkDestroySwapchainKHR(m_device, m_swapchain, nullptr);
     vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
+    vmaDestroyAllocator(m_allocator);
     vkDestroyDevice(m_device, nullptr);
     vkDestroyInstance(m_instance, nullptr);
 
@@ -720,27 +652,6 @@ VkShaderModule HelloVulkan::createShaderModule(const char *filename) const
     VkShaderModule shaderModule = VK_NULL_HANDLE;
     VK_CHECK(vkCreateShaderModule(m_device, &createInfo, nullptr, &shaderModule));
     return shaderModule;
-}
-
-HelloVulkan::DeviceMemory HelloVulkan::allocateMemory(VkDeviceSize size) const
-{
-    // Find first host-visible memory
-    auto it = std::ranges::find_if(m_memoryHeaps, [](const MemoryHeap &memoryHeap) {
-        return (memoryHeap.flags & MemoryHeap::Flags::HostVisible) == MemoryHeap::Flags::HostVisible;
-    });
-    if (it == m_memoryHeaps.end())
-        return {};
-    const auto &memoryHeap = *it;
-    std::cout << "**** memoryHeap.flags=" << static_cast<uint32_t>(memoryHeap.flags) << '\n';
-    const auto allocateInfo = VkMemoryAllocateInfo{
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize = size,
-        .memoryTypeIndex = memoryHeap.typeIndex,
-    };
-    VkDeviceMemory deviceMemory = VK_NULL_HANDLE;
-    VK_CHECK(vkAllocateMemory(m_device, &allocateInfo, nullptr, &deviceMemory));
-    const auto isHostCoherent = (memoryHeap.flags & MemoryHeap::Flags::HostCoherent) == MemoryHeap::Flags::HostCoherent;
-    return { deviceMemory, isHostCoherent };
 }
 
 VkCommandBuffer HelloVulkan::allocateCommandBuffer() const
@@ -776,6 +687,25 @@ VkSemaphore HelloVulkan::createSemaphore() const
     VkSemaphore semaphore = VK_NULL_HANDLE;
     VK_CHECK(vkCreateSemaphore(m_device, &createInfo, nullptr, &semaphore));
     return semaphore;
+}
+
+HelloVulkan::Buffer HelloVulkan::allocateBuffer(VkDeviceSize size, VkBufferUsageFlagBits usage) const
+{
+    const auto bufferInfo = VkBufferCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = size,
+        .usage = usage
+    };
+
+    const auto allocInfo = VmaAllocationCreateInfo{
+        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO
+    };
+
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VmaAllocation allocation = VK_NULL_HANDLE;
+    VK_CHECK(vmaCreateBuffer(m_allocator, &bufferInfo, &allocInfo, &buffer, &allocation, nullptr));
+    return { buffer, allocation };
 }
 
 int main()
