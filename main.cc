@@ -101,6 +101,7 @@ int main()
         VK_CHECK(vkCreateInstance(&createInfo, nullptr, &instance));
         return instance;
     }();
+    assert(instance != VK_NULL_HANDLE);
     std::cout << "*** instance=" << instance << '\n';
 
     // find physical device with graphics queue
@@ -173,8 +174,7 @@ int main()
     std::cout << "*** device=" << device << " queue=" << queue << '\n';
 
     VkSurfaceKHR surface = VK_NULL_HANDLE;
-    const auto result = glfwCreateWindowSurface(instance, window, nullptr, &surface);
-    assert(result == VK_SUCCESS);
+    VK_CHECK(glfwCreateWindowSurface(instance, window, nullptr, &surface));
 
     VkBool32 presentSupported = VK_FALSE;
     VK_CHECK(vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, 0, surface, &presentSupported));
@@ -548,6 +548,7 @@ int main()
         return { deviceMemory, isHostCoherent };
     };
     const auto [deviceMemory, memoryIsHostCoherent] = allocateMemory(bufferSize);
+    assert(deviceMemory != VK_NULL_HANDLE);
     std::cout << "**** deviceMemory=" << deviceMemory << " hostCoherent=" << memoryIsHostCoherent << '\n';
     VK_CHECK(vkBindBufferMemory(device, vertexBuffer, deviceMemory, 0));
 
