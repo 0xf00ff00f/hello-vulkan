@@ -65,15 +65,76 @@ struct MemoryHeap {
         }                                                        \
     } while (false)
 
-int main()
+class HelloVulkan
+{
+public:
+    HelloVulkan();
+    ~HelloVulkan();
+
+    void run();
+
+private:
+    static constexpr auto QueueSlotCount = 3;
+
+    struct DeviceMemory {
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        bool isHostCoherent = false;
+    };
+
+    void initialize();
+    void cleanup();
+
+    VkShaderModule createShaderModule(const char *filename) const;
+    DeviceMemory allocateMemory(VkDeviceSize size) const;
+    VkCommandBuffer allocateCommandBuffer() const;
+    VkFence createFence(bool createSignaled = true) const;
+    VkSemaphore createSemaphore() const;
+
+    GLFWwindow *m_window = nullptr;
+    VkInstance m_instance = VK_NULL_HANDLE;
+    VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
+    uint32_t m_graphicsQueueIndex = uint32_t(-1);
+    std::vector<MemoryHeap> m_memoryHeaps;
+    VkDevice m_device = VK_NULL_HANDLE;
+    VkQueue m_queue = VK_NULL_HANDLE;
+    VkSurfaceKHR m_surface = VK_NULL_HANDLE;
+    VkSwapchainKHR m_swapchain;
+    VkExtent2D m_swapchainExtent = {};
+    VkFormat m_swapchainFormat = VK_FORMAT_UNDEFINED;
+    VkRenderPass m_renderPass = VK_NULL_HANDLE;
+    std::vector<VkImage> m_swapchainImages;
+    std::vector<VkImageView> m_swapchainImageViews;
+    std::vector<VkFramebuffer> m_swapchainFramebuffers;
+    VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_pipeline = VK_NULL_HANDLE;
+    VkBuffer m_vertexBuffer = VK_NULL_HANDLE;
+    DeviceMemory m_deviceMemory;
+    VkCommandPool m_commandPool = VK_NULL_HANDLE;
+    VkCommandBuffer m_commandBuffer = VK_NULL_HANDLE;
+    VkFence m_inFlightFence = VK_NULL_HANDLE;
+    VkSemaphore m_imageAcquiredSemaphore = VK_NULL_HANDLE;
+    VkSemaphore m_renderingCompleteSemaphore = VK_NULL_HANDLE;
+};
+
+HelloVulkan::HelloVulkan()
+{
+    initialize();
+}
+
+HelloVulkan::~HelloVulkan()
+{
+    cleanup();
+}
+
+void HelloVulkan::initialize()
 {
     glfwInit();
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    GLFWwindow *window = glfwCreateWindow(400, 400, "vulkan window", nullptr, nullptr);
+    m_window = glfwCreateWindow(400, 400, "vulkan window", nullptr, nullptr);
 
     // create instance
-    const auto instance = []() -> VkInstance {
+    m_instance = []() -> VkInstance {
         const std::vector<const char *> instanceLayers = { "VK_LAYER_KHRONOS_validation" };
 
         uint32_t extensionCount = 0;
@@ -101,16 +162,16 @@ int main()
         VK_CHECK(vkCreateInstance(&createInfo, nullptr, &instance));
         return instance;
     }();
-    assert(instance != VK_NULL_HANDLE);
-    std::cout << "*** instance=" << instance << '\n';
+    assert(m_instance != VK_NULL_HANDLE);
+    std::cout << "*** instance=" << m_instance << '\n';
 
     // find physical device with graphics queue
-    const auto [physicalDevice, graphicsQueueIndex] = [instance]() -> std::tuple<VkPhysicalDevice, uint32_t> {
+    std::tie(m_physicalDevice, m_graphicsQueueIndex) = [this]() -> std::tuple<VkPhysicalDevice, uint32_t> {
         uint32_t count = 0;
-        VK_CHECK(vkEnumeratePhysicalDevices(instance, &count, nullptr));
+        VK_CHECK(vkEnumeratePhysicalDevices(m_instance, &count, nullptr));
 
         std::vector<VkPhysicalDevice> physicalDevices(count);
-        VK_CHECK(vkEnumeratePhysicalDevices(instance, &count, physicalDevices.data()));
+        VK_CHECK(vkEnumeratePhysicalDevices(m_instance, &count, physicalDevices.data()));
 
         for (const auto &physicalDevice : physicalDevices) {
             const auto usable = [physicalDevice] {
@@ -138,19 +199,46 @@ int main()
 
         return { VK_NULL_HANDLE, uint32_t(-1) };
     }();
-    assert(physicalDevice != VK_NULL_HANDLE);
-    assert(graphicsQueueIndex != uint32_t(-1));
-    std::cout << "*** physicalDevice=" << instance << " graphicsQueueIndex=" << graphicsQueueIndex << '\n';
+    assert(m_physicalDevice != VK_NULL_HANDLE);
+    assert(m_graphicsQueueIndex != uint32_t(-1));
+    std::cout << "*** physicalDevice=" << m_physicalDevice << " graphicsQueueIndex=" << m_graphicsQueueIndex << '\n';
+
+    m_memoryHeaps = [this]() -> std::vector<MemoryHeap> {
+        VkPhysicalDeviceMemoryProperties memoryProperties = {};
+        vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memoryProperties);
+        std::vector<MemoryHeap> memoryHeaps;
+        for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i) {
+            const auto &vkMemoryType = memoryProperties.memoryTypes[i];
+            const auto &vkMemoryHeap = memoryProperties.memoryHeaps[vkMemoryType.heapIndex];
+            MemoryHeap memoryHeap;
+            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+                memoryHeap.flags |= MemoryHeap::Flags::DeviceLocal;
+            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+                memoryHeap.flags |= MemoryHeap::Flags::HostVisible;
+            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+                memoryHeap.flags |= MemoryHeap::Flags::HostCoherent;
+            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
+                memoryHeap.flags |= MemoryHeap::Flags::HostCached;
+            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)
+                memoryHeap.flags |= MemoryHeap::Flags::LazilyAllocated;
+            memoryHeap.heapSize = vkMemoryHeap.size;
+            memoryHeap.heapDeviceLocal = vkMemoryHeap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
+            memoryHeap.typeIndex = i;
+            std::cout << "**** i=" << i << " flags=" << static_cast<uint32_t>(memoryHeap.flags) << '\n';
+            memoryHeaps.push_back(memoryHeap);
+        }
+        return memoryHeaps;
+    }();
 
     // create logical device
-    const auto [device, queue] = [instance, physicalDevice, graphicsQueueIndex]() -> std::tuple<VkDevice, VkQueue> {
+    std::tie(m_device, m_queue) = [this]() -> std::tuple<VkDevice, VkQueue> {
         const std::vector<const char *> deviceExtensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
         const auto queuePriority = 1.0f;
 
         const auto deviceQueueCreateInfo = VkDeviceQueueCreateInfo{
             .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-            .queueFamilyIndex = graphicsQueueIndex,
+            .queueFamilyIndex = m_graphicsQueueIndex,
             .queueCount = 1,
             .pQueuePriorities = &queuePriority
         };
@@ -164,33 +252,30 @@ int main()
         };
 
         VkDevice device = VK_NULL_HANDLE;
-        VK_CHECK(vkCreateDevice(physicalDevice, &createInfo, nullptr, &device));
+        VK_CHECK(vkCreateDevice(m_physicalDevice, &createInfo, nullptr, &device));
 
         VkQueue queue = VK_NULL_HANDLE;
-        vkGetDeviceQueue(device, graphicsQueueIndex, 0, &queue);
+        vkGetDeviceQueue(device, m_graphicsQueueIndex, 0, &queue);
 
         return { device, queue };
     }();
-    std::cout << "*** device=" << device << " queue=" << queue << '\n';
+    std::cout << "*** device=" << m_device << " queue=" << m_queue << '\n';
 
-    VkSurfaceKHR surface = VK_NULL_HANDLE;
-    VK_CHECK(glfwCreateWindowSurface(instance, window, nullptr, &surface));
+    VK_CHECK(glfwCreateWindowSurface(m_instance, m_window, nullptr, &m_surface));
 
     VkBool32 presentSupported = VK_FALSE;
-    VK_CHECK(vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, 0, surface, &presentSupported));
+    VK_CHECK(vkGetPhysicalDeviceSurfaceSupportKHR(m_physicalDevice, 0, m_surface, &presentSupported));
     assert(presentSupported == VK_TRUE);
 
-    constexpr auto QueueSlotCount = 3;
-
-    const auto [swapchain, swapchainExtent, swapchainFormat] = [physicalDevice, surface, device]() -> std::tuple<VkSwapchainKHR, VkExtent2D, VkFormat> {
+    std::tie(m_swapchain, m_swapchainExtent, m_swapchainFormat) = [this]() -> std::tuple<VkSwapchainKHR, VkExtent2D, VkFormat> {
         VkSurfaceCapabilitiesKHR surfaceCapabilities = {};
-        VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCapabilities));
+        VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(m_physicalDevice, m_surface, &surfaceCapabilities));
 
         uint32_t presentModeCount = 0;
-        VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &presentModeCount, nullptr));
+        VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(m_physicalDevice, m_surface, &presentModeCount, nullptr));
 
         std::vector<VkPresentModeKHR> presentModes(presentModeCount);
-        VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &presentModeCount, presentModes.data()));
+        VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(m_physicalDevice, m_surface, &presentModeCount, presentModes.data()));
 
         const VkExtent2D extent = surfaceCapabilities.currentExtent;
 
@@ -203,12 +288,12 @@ int main()
             return surfaceCapabilities.currentTransform;
         }();
 
-        const auto [format, colorSpace] = [physicalDevice, surface]() -> std::tuple<VkFormat, VkColorSpaceKHR> {
+        const auto [format, colorSpace] = [this]() -> std::tuple<VkFormat, VkColorSpaceKHR> {
             uint32_t count = 0;
-            VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, nullptr));
+            VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(m_physicalDevice, m_surface, &count, nullptr));
 
             std::vector<VkSurfaceFormatKHR> formats(count);
-            VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, formats.data()));
+            VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(m_physicalDevice, m_surface, &count, formats.data()));
 
             for (const auto &format : formats)
                 std::cout << "format=" << format.format << " colorSpace=" << format.colorSpace << '\n';
@@ -224,7 +309,7 @@ int main()
 
         const auto createInfo = VkSwapchainCreateInfoKHR{
             .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-            .surface = surface,
+            .surface = m_surface,
             .minImageCount = imageCount,
             .imageFormat = format,
             .imageColorSpace = colorSpace,
@@ -239,15 +324,15 @@ int main()
         };
 
         VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-        VK_CHECK(vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapchain));
+        VK_CHECK(vkCreateSwapchainKHR(m_device, &createInfo, nullptr, &swapchain));
 
         return { swapchain, extent, format };
     }();
-    std::cout << "*** swapchain=" << swapchain << " format=" << swapchainFormat << " extent=" << swapchainExtent.width << 'x' << swapchainExtent.height << '\n';
+    std::cout << "*** swapchain=" << m_swapchain << " format=" << m_swapchainFormat << " extent=" << m_swapchainExtent.width << 'x' << m_swapchainExtent.height << '\n';
 
-    const auto renderPass = [device, swapchainFormat]() -> VkRenderPass {
+    m_renderPass = [this]() -> VkRenderPass {
         const auto attachmentDescription = VkAttachmentDescription{
-            .format = swapchainFormat,
+            .format = m_swapchainFormat,
             .samples = VK_SAMPLE_COUNT_1_BIT,
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -278,81 +363,67 @@ int main()
         };
 
         VkRenderPass renderPass = VK_NULL_HANDLE;
-        VK_CHECK(vkCreateRenderPass(device, &createInfo, nullptr, &renderPass));
+        VK_CHECK(vkCreateRenderPass(m_device, &createInfo, nullptr, &renderPass));
         return renderPass;
     }();
-    std::cout << "*** renderPass=" << renderPass << '\n';
+    std::cout << "*** renderPass=" << m_renderPass << '\n';
 
     uint32_t swapchainImageCount = 0;
-    VK_CHECK(vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, nullptr));
+    VK_CHECK(vkGetSwapchainImagesKHR(m_device, m_swapchain, &swapchainImageCount, nullptr));
     assert(swapchainImageCount == QueueSlotCount);
 
-    std::vector<VkImage> swapchainImages(swapchainImageCount);
-    VK_CHECK(vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, swapchainImages.data()));
+    m_swapchainImages.resize(swapchainImageCount);
+    VK_CHECK(vkGetSwapchainImagesKHR(m_device, m_swapchain, &swapchainImageCount, m_swapchainImages.data()));
 
-    const auto swapchainImageViews = swapchainImages | std::views::transform([device, swapchainFormat](VkImage image) -> VkImageView {
-                                         const auto createInfo = VkImageViewCreateInfo{
-                                             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-                                             .image = image,
-                                             .viewType = VK_IMAGE_VIEW_TYPE_2D,
-                                             .format = swapchainFormat,
-                                             .subresourceRange = {
-                                                     .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                                                     .levelCount = 1,
-                                                     .layerCount = 1,
-                                             }
-                                         };
-                                         VkImageView imageView = VK_NULL_HANDLE;
-                                         VK_CHECK(vkCreateImageView(device, &createInfo, nullptr, &imageView));
-                                         return imageView;
-                                     }) |
+    m_swapchainImageViews = m_swapchainImages | std::views::transform([this](VkImage image) -> VkImageView {
+                                const auto createInfo = VkImageViewCreateInfo{
+                                    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                    .image = image,
+                                    .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                    .format = m_swapchainFormat,
+                                    .subresourceRange = {
+                                            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                            .levelCount = 1,
+                                            .layerCount = 1,
+                                    }
+                                };
+                                VkImageView imageView = VK_NULL_HANDLE;
+                                VK_CHECK(vkCreateImageView(m_device, &createInfo, nullptr, &imageView));
+                                return imageView;
+                            }) |
             std::ranges::to<std::vector<VkImageView>>();
 
-    const auto swapchainFramebuffers = swapchainImageViews | std::views::transform([device, renderPass, swapchainExtent](const VkImageView imageView) -> VkFramebuffer {
-                                           const auto createInfo = VkFramebufferCreateInfo{
-                                               .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-                                               .renderPass = renderPass,
-                                               .attachmentCount = 1,
-                                               .pAttachments = &imageView,
-                                               .width = swapchainExtent.width,
-                                               .height = swapchainExtent.height,
-                                               .layers = 1,
-                                           };
-                                           VkFramebuffer framebuffer = VK_NULL_HANDLE;
-                                           VK_CHECK(vkCreateFramebuffer(device, &createInfo, nullptr, &framebuffer));
-                                           return framebuffer;
-                                       }) |
+    m_swapchainFramebuffers = m_swapchainImageViews | std::views::transform([this](const VkImageView imageView) -> VkFramebuffer {
+                                  const auto createInfo = VkFramebufferCreateInfo{
+                                      .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                                      .renderPass = m_renderPass,
+                                      .attachmentCount = 1,
+                                      .pAttachments = &imageView,
+                                      .width = m_swapchainExtent.width,
+                                      .height = m_swapchainExtent.height,
+                                      .layers = 1,
+                                  };
+                                  VkFramebuffer framebuffer = VK_NULL_HANDLE;
+                                  VK_CHECK(vkCreateFramebuffer(m_device, &createInfo, nullptr, &framebuffer));
+                                  return framebuffer;
+                              }) |
             std::ranges::to<std::vector<VkFramebuffer>>();
 
-    const auto pipelineLayout = [device]() -> VkPipelineLayout {
+    m_pipelineLayout = [this]() -> VkPipelineLayout {
         const auto createInfo = VkPipelineLayoutCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
         };
         VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-        VK_CHECK(vkCreatePipelineLayout(device, &createInfo, nullptr, &pipelineLayout));
+        VK_CHECK(vkCreatePipelineLayout(m_device, &createInfo, nullptr, &pipelineLayout));
         return pipelineLayout;
     }();
-    std::cout << "**** pipelineLayout=" << pipelineLayout << '\n';
+    std::cout << "**** pipelineLayout=" << m_pipelineLayout << '\n';
 
     struct Vertex {
         std::array<float, 2> position;
         std::array<float, 3> color;
     };
-    const auto graphicsPipeline = [device, swapchainExtent, pipelineLayout, renderPass]() -> VkPipeline {
-        const auto createShaderModule = [device](const char *filename) -> VkShaderModule {
-            const auto code = readFile(filename);
-            if (code.empty())
-                return VK_NULL_HANDLE;
-
-            const auto createInfo = VkShaderModuleCreateInfo{
-                .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-                .codeSize = code.size(),
-                .pCode = reinterpret_cast<const uint32_t *>(code.data())
-            };
-            VkShaderModule shaderModule = VK_NULL_HANDLE;
-            VK_CHECK(vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule));
-            return shaderModule;
-        };
+    m_pipeline = [this]() -> VkPipeline {
         auto vertShaderModule = createShaderModule("shaders/simple.vert.spv");
         std::cout << "**** vertShadeModule=" << vertShaderModule << '\n';
 
@@ -405,14 +476,14 @@ int main()
         const auto viewport = VkViewport{
             .x = 0.0f,
             .y = 0.0f,
-            .width = static_cast<float>(swapchainExtent.width),
-            .height = static_cast<float>(swapchainExtent.height),
+            .width = static_cast<float>(m_swapchainExtent.width),
+            .height = static_cast<float>(m_swapchainExtent.height),
             .minDepth = 0.0f,
             .maxDepth = 1.0f,
         };
         const auto scissor = VkRect2D{
             .offset = VkOffset2D{ .x = 0, .y = 0 },
-            .extent = swapchainExtent
+            .extent = m_swapchainExtent
         };
         const auto viewportState = VkPipelineViewportStateCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
@@ -463,19 +534,19 @@ int main()
             .pRasterizationState = &rasterizationState,
             .pMultisampleState = &multisampleState,
             .pColorBlendState = &colorBlendState,
-            .layout = pipelineLayout,
-            .renderPass = renderPass
+            .layout = m_pipelineLayout,
+            .renderPass = m_renderPass
         };
 
-        VkPipeline graphicsPipeline = VK_NULL_HANDLE;
-        VK_CHECK(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &createInfo, nullptr, &graphicsPipeline));
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VK_CHECK(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &createInfo, nullptr, &pipeline));
 
-        vkDestroyShaderModule(device, fragShaderModule, nullptr);
-        vkDestroyShaderModule(device, vertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, fragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, vertShaderModule, nullptr);
 
-        return graphicsPipeline;
+        return pipeline;
     }();
-    std::cout << "**** graphicsPipeline=" << graphicsPipeline << '\n';
+    std::cout << "**** pipeline=" << m_pipeline << '\n';
 
     const auto vertices = std::array<Vertex, 4>{
         Vertex{ { 0.0, -0.5 }, { 1.0, 0.0, 0.0 } },
@@ -483,227 +554,232 @@ int main()
         Vertex{ { -0.5, 0.5 }, { 0.0, 0.0, 1.0 } },
     };
 
-    auto createBuffer = [device](uint32_t size, VkBufferUsageFlagBits usage) {
+    auto createBuffer = [this](uint32_t size, VkBufferUsageFlagBits usage) {
         const auto createInfo = VkBufferCreateInfo{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
             .size = size,
             .usage = usage
         };
         VkBuffer buffer = VK_NULL_HANDLE;
-        VK_CHECK(vkCreateBuffer(device, &createInfo, nullptr, &buffer));
+        VK_CHECK(vkCreateBuffer(m_device, &createInfo, nullptr, &buffer));
         return buffer;
     };
-    const auto vertexBuffer = createBuffer(sizeof(vertices), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    m_vertexBuffer = createBuffer(sizeof(vertices), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
 
     VkMemoryRequirements memoryRequirements = {};
-    vkGetBufferMemoryRequirements(device, vertexBuffer, &memoryRequirements);
+    vkGetBufferMemoryRequirements(m_device, m_vertexBuffer, &memoryRequirements);
     const auto bufferSize = memoryRequirements.size;
 
-    const auto memoryHeaps = [physicalDevice]() -> std::vector<MemoryHeap> {
-        VkPhysicalDeviceMemoryProperties memoryProperties = {};
-        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memoryProperties);
-        std::vector<MemoryHeap> memoryHeaps;
-        for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i) {
-            const auto &vkMemoryType = memoryProperties.memoryTypes[i];
-            const auto &vkMemoryHeap = memoryProperties.memoryHeaps[vkMemoryType.heapIndex];
-            MemoryHeap memoryHeap;
-            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-                memoryHeap.flags |= MemoryHeap::Flags::DeviceLocal;
-            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
-                memoryHeap.flags |= MemoryHeap::Flags::HostVisible;
-            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-                memoryHeap.flags |= MemoryHeap::Flags::HostCoherent;
-            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
-                memoryHeap.flags |= MemoryHeap::Flags::HostCached;
-            if (vkMemoryType.propertyFlags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)
-                memoryHeap.flags |= MemoryHeap::Flags::LazilyAllocated;
-            memoryHeap.heapSize = vkMemoryHeap.size;
-            memoryHeap.heapDeviceLocal = vkMemoryHeap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
-            memoryHeap.typeIndex = i;
-            std::cout << "**** i=" << i << " flags=" << static_cast<uint32_t>(memoryHeap.flags) << '\n';
-            memoryHeaps.push_back(memoryHeap);
-        }
-        return memoryHeaps;
-    }();
-    struct DeviceMemory {
-        VkDeviceMemory deviceMemory = VK_NULL_HANDLE;
-        bool isHostCoherent = false;
-    };
-    const auto allocateMemory = [device, &memoryHeaps](uint32_t size) -> DeviceMemory {
-        auto it = std::ranges::find_if(memoryHeaps, [](const MemoryHeap &memoryHeap) {
-            return (memoryHeap.flags & MemoryHeap::Flags::HostVisible) == MemoryHeap::Flags::HostVisible;
-        });
-        if (it == memoryHeaps.end())
-            return {};
-        const auto &memoryHeap = *it;
-        std::cout << "**** memoryHeap.flags=" << static_cast<uint32_t>(memoryHeap.flags) << '\n';
-        const auto allocateInfo = VkMemoryAllocateInfo{
-            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-            .allocationSize = size,
-            .memoryTypeIndex = memoryHeap.typeIndex,
-        };
-        VkDeviceMemory deviceMemory = VK_NULL_HANDLE;
-        VK_CHECK(vkAllocateMemory(device, &allocateInfo, nullptr, &deviceMemory));
-        const auto isHostCoherent = (memoryHeap.flags & MemoryHeap::Flags::HostCoherent) == MemoryHeap::Flags::HostCoherent;
-        return { deviceMemory, isHostCoherent };
-    };
-    const auto [deviceMemory, memoryIsHostCoherent] = allocateMemory(bufferSize);
-    assert(deviceMemory != VK_NULL_HANDLE);
-    std::cout << "**** deviceMemory=" << deviceMemory << " hostCoherent=" << memoryIsHostCoherent << '\n';
-    VK_CHECK(vkBindBufferMemory(device, vertexBuffer, deviceMemory, 0));
+    m_deviceMemory = allocateMemory(bufferSize);
+    assert(m_deviceMemory.memory != VK_NULL_HANDLE);
+    std::cout << "**** deviceMemory=" << m_deviceMemory.memory << " hostCoherent=" << m_deviceMemory.isHostCoherent << '\n';
+    VK_CHECK(vkBindBufferMemory(m_device, m_vertexBuffer, m_deviceMemory.memory, 0));
 
     {
         void *mapping = nullptr;
-        VK_CHECK(vkMapMemory(device, deviceMemory, 0, VK_WHOLE_SIZE, 0, &mapping));
+        VK_CHECK(vkMapMemory(m_device, m_deviceMemory.memory, 0, VK_WHOLE_SIZE, 0, &mapping));
         assert(mapping != nullptr);
         std::memcpy(mapping, vertices.data(), sizeof(vertices));
-        if (!memoryIsHostCoherent) {
+        if (!m_deviceMemory.isHostCoherent) {
             const auto mappedMemoryRange = VkMappedMemoryRange{
                 .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
-                .memory = deviceMemory,
+                .memory = m_deviceMemory.memory,
                 .offset = 0,
                 .size = VK_WHOLE_SIZE,
             };
-            VK_CHECK(vkFlushMappedMemoryRanges(device, 1, &mappedMemoryRange));
+            VK_CHECK(vkFlushMappedMemoryRanges(m_device, 1, &mappedMemoryRange));
         }
-        vkUnmapMemory(device, deviceMemory);
+        vkUnmapMemory(m_device, m_deviceMemory.memory);
     }
 
-    const auto commandPool = [graphicsQueueIndex, device]() -> VkCommandPool {
+    m_commandPool = [this]() -> VkCommandPool {
         const auto createInfo = VkCommandPoolCreateInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
             .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-            .queueFamilyIndex = graphicsQueueIndex,
+            .queueFamilyIndex = m_graphicsQueueIndex,
         };
 
         VkCommandPool commandPool = VK_NULL_HANDLE;
-        VK_CHECK(vkCreateCommandPool(device, &createInfo, nullptr, &commandPool));
+        VK_CHECK(vkCreateCommandPool(m_device, &createInfo, nullptr, &commandPool));
         return commandPool;
     }();
-    std::cout << "*** commandPool=" << commandPool << '\n';
+    std::cout << "*** commandPool=" << m_commandPool << '\n';
 
-    auto allocateCommandBuffer = [device, commandPool]() -> VkCommandBuffer {
-        const auto allocateInfo = VkCommandBufferAllocateInfo{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-            .commandPool = commandPool,
-            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = 1,
-        };
+    m_commandBuffer = allocateCommandBuffer();
 
-        VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-        VK_CHECK(vkAllocateCommandBuffers(device, &allocateInfo, &commandBuffer));
-        return commandBuffer;
-    };
+    m_inFlightFence = createFence();
+    std::cout << "**** inFlightFence=" << m_inFlightFence << '\n';
 
-    const auto commandBuffer = allocateCommandBuffer();
+    m_imageAcquiredSemaphore = createSemaphore();
+    std::cout << "**** imageAcquiredSemaphore=" << m_imageAcquiredSemaphore << '\n';
+    m_renderingCompleteSemaphore = createSemaphore();
+    std::cout << "**** renderingCompleteSemaphore=" << m_renderingCompleteSemaphore << '\n';
+}
 
-    auto createFence = [device]() -> VkFence {
-        const auto createInfo = VkFenceCreateInfo{
-            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-            .flags = VK_FENCE_CREATE_SIGNALED_BIT, // so we can wait for them on the first try
-        };
-        VkFence fence = VK_NULL_HANDLE;
-        VK_CHECK(vkCreateFence(device, &createInfo, nullptr, &fence));
-        return fence;
-    };
-    auto inFlightFence = createFence();
-    std::cout << "**** inFlightFence=" << inFlightFence << '\n';
-
-    const auto createSemaphore = [device]() -> VkSemaphore {
-        const auto createInfo = VkSemaphoreCreateInfo{
-            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
-        };
-        VkSemaphore semaphore = VK_NULL_HANDLE;
-        VK_CHECK(vkCreateSemaphore(device, &createInfo, nullptr, &semaphore));
-        return semaphore;
-    };
-    auto imageAcquiredSemaphore = createSemaphore();
-    std::cout << "**** imageAcquiredSemaphore=" << imageAcquiredSemaphore << '\n';
-    auto renderingCompleteSemaphore = createSemaphore();
-    std::cout << "**** renderingCompleteSemaphore=" << renderingCompleteSemaphore << '\n';
-
-    while (!glfwWindowShouldClose(window)) {
+void HelloVulkan::run()
+{
+    while (!glfwWindowShouldClose(m_window)) {
         glfwPollEvents();
 
         // wait for previous frame to finish
-        VK_CHECK(vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX));
-        VK_CHECK(vkResetFences(device, 1, &inFlightFence));
+        VK_CHECK(vkWaitForFences(m_device, 1, &m_inFlightFence, VK_TRUE, UINT64_MAX));
+        VK_CHECK(vkResetFences(m_device, 1, &m_inFlightFence));
 
         uint32_t currentBackBuffer = uint32_t(-1);
-        VK_CHECK(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAcquiredSemaphore, VK_NULL_HANDLE, &currentBackBuffer));
+        VK_CHECK(vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX, m_imageAcquiredSemaphore, VK_NULL_HANDLE, &currentBackBuffer));
         std::cout << "**** after vkAcquireNextImageKHR currentBackBuffer=" << currentBackBuffer << '\n';
 
         const auto beginInfo = VkCommandBufferBeginInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
         };
-        VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
+        VK_CHECK(vkBeginCommandBuffer(m_commandBuffer, &beginInfo));
 
         const auto clearValue = VkClearValue{
             .color = { 0.0f, 1.0f, 1.0f, 1.0f }
         };
         const auto renderPassBeginInfo = VkRenderPassBeginInfo{
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-            .renderPass = renderPass,
-            .framebuffer = swapchainFramebuffers[currentBackBuffer],
+            .renderPass = m_renderPass,
+            .framebuffer = m_swapchainFramebuffers[currentBackBuffer],
             .renderArea = {
-                    .extent = swapchainExtent,
+                    .extent = m_swapchainExtent,
             },
             .clearValueCount = 1,
             .pClearValues = &clearValue,
         };
-        vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        vkCmdBeginRenderPass(m_commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
         VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffer, &offset);
-        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
-        vkCmdEndRenderPass(commandBuffer);
+        vkCmdBindVertexBuffers(m_commandBuffer, 0, 1, &m_vertexBuffer, &offset);
+        vkCmdDraw(m_commandBuffer, 3, 1, 0, 0);
+        vkCmdEndRenderPass(m_commandBuffer);
 
-        VK_CHECK(vkEndCommandBuffer(commandBuffer));
+        VK_CHECK(vkEndCommandBuffer(m_commandBuffer));
 
         const VkPipelineStageFlags waitDstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         const auto submitInfo = VkSubmitInfo{
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
             .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &imageAcquiredSemaphore,
+            .pWaitSemaphores = &m_imageAcquiredSemaphore,
             .pWaitDstStageMask = &waitDstStageMask,
             .commandBufferCount = 1,
-            .pCommandBuffers = &commandBuffer,
+            .pCommandBuffers = &m_commandBuffer,
             .signalSemaphoreCount = 1,
-            .pSignalSemaphores = &renderingCompleteSemaphore
+            .pSignalSemaphores = &m_renderingCompleteSemaphore
         };
-        VK_CHECK(vkQueueSubmit(queue, 1, &submitInfo, inFlightFence));
+        VK_CHECK(vkQueueSubmit(m_queue, 1, &submitInfo, m_inFlightFence));
 
         const auto presentInfo = VkPresentInfoKHR{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &renderingCompleteSemaphore,
+            .pWaitSemaphores = &m_renderingCompleteSemaphore,
             .swapchainCount = 1,
-            .pSwapchains = &swapchain,
+            .pSwapchains = &m_swapchain,
             .pImageIndices = &currentBackBuffer
         };
-        VK_CHECK(vkQueuePresentKHR(queue, &presentInfo));
+        VK_CHECK(vkQueuePresentKHR(m_queue, &presentInfo));
     }
 
-    VK_CHECK(vkDeviceWaitIdle(device));
+    VK_CHECK(vkDeviceWaitIdle(m_device));
+}
 
-    vkDestroySemaphore(device, renderingCompleteSemaphore, nullptr);
-    vkDestroySemaphore(device, imageAcquiredSemaphore, nullptr);
-    vkDestroyFence(device, inFlightFence, nullptr);
-    vkFreeMemory(device, deviceMemory, nullptr);
-    vkDestroyBuffer(device, vertexBuffer, nullptr);
-    vkDestroyPipeline(device, graphicsPipeline, nullptr);
-    vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-    vkDestroyCommandPool(device, commandPool, nullptr);
-    for (auto framebuffer : swapchainFramebuffers)
-        vkDestroyFramebuffer(device, framebuffer, nullptr);
-    for (auto imageView : swapchainImageViews)
-        vkDestroyImageView(device, imageView, nullptr);
-    vkDestroyRenderPass(device, renderPass, nullptr);
-    vkDestroySwapchainKHR(device, swapchain, nullptr);
-    vkDestroySurfaceKHR(instance, surface, nullptr);
-    vkDestroyDevice(device, nullptr);
-    vkDestroyInstance(instance, nullptr);
+void HelloVulkan::cleanup()
+{
+    vkDestroySemaphore(m_device, m_renderingCompleteSemaphore, nullptr);
+    vkDestroySemaphore(m_device, m_imageAcquiredSemaphore, nullptr);
+    vkDestroyFence(m_device, m_inFlightFence, nullptr);
+    vkFreeMemory(m_device, m_deviceMemory.memory, nullptr);
+    vkDestroyBuffer(m_device, m_vertexBuffer, nullptr);
+    vkDestroyPipeline(m_device, m_pipeline, nullptr);
+    vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
+    vkDestroyCommandPool(m_device, m_commandPool, nullptr);
+    for (auto framebuffer : m_swapchainFramebuffers)
+        vkDestroyFramebuffer(m_device, framebuffer, nullptr);
+    for (auto imageView : m_swapchainImageViews)
+        vkDestroyImageView(m_device, imageView, nullptr);
+    vkDestroyRenderPass(m_device, m_renderPass, nullptr);
+    vkDestroySwapchainKHR(m_device, m_swapchain, nullptr);
+    vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
+    vkDestroyDevice(m_device, nullptr);
+    vkDestroyInstance(m_instance, nullptr);
 
-    glfwDestroyWindow(window);
+    glfwDestroyWindow(m_window);
     glfwTerminate();
+}
+
+VkShaderModule HelloVulkan::createShaderModule(const char *filename) const
+{
+    const auto code = readFile(filename);
+    if (code.empty())
+        return VK_NULL_HANDLE;
+    const auto createInfo = VkShaderModuleCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = code.size(),
+        .pCode = reinterpret_cast<const uint32_t *>(code.data())
+    };
+    VkShaderModule shaderModule = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateShaderModule(m_device, &createInfo, nullptr, &shaderModule));
+    return shaderModule;
+}
+
+HelloVulkan::DeviceMemory HelloVulkan::allocateMemory(VkDeviceSize size) const
+{
+    // Find first host-visible memory
+    auto it = std::ranges::find_if(m_memoryHeaps, [](const MemoryHeap &memoryHeap) {
+        return (memoryHeap.flags & MemoryHeap::Flags::HostVisible) == MemoryHeap::Flags::HostVisible;
+    });
+    if (it == m_memoryHeaps.end())
+        return {};
+    const auto &memoryHeap = *it;
+    std::cout << "**** memoryHeap.flags=" << static_cast<uint32_t>(memoryHeap.flags) << '\n';
+    const auto allocateInfo = VkMemoryAllocateInfo{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = size,
+        .memoryTypeIndex = memoryHeap.typeIndex,
+    };
+    VkDeviceMemory deviceMemory = VK_NULL_HANDLE;
+    VK_CHECK(vkAllocateMemory(m_device, &allocateInfo, nullptr, &deviceMemory));
+    const auto isHostCoherent = (memoryHeap.flags & MemoryHeap::Flags::HostCoherent) == MemoryHeap::Flags::HostCoherent;
+    return { deviceMemory, isHostCoherent };
+}
+
+VkCommandBuffer HelloVulkan::allocateCommandBuffer() const
+{
+    const auto allocateInfo = VkCommandBufferAllocateInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = m_commandPool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VK_CHECK(vkAllocateCommandBuffers(m_device, &allocateInfo, &commandBuffer));
+    return commandBuffer;
+}
+
+VkFence HelloVulkan::createFence(bool createSignaled) const
+{
+    auto createInfo = VkFenceCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+    };
+    if (createSignaled)
+        createInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; // so can wait for fence on first try;
+    VkFence fence = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateFence(m_device, &createInfo, nullptr, &fence));
+    return fence;
+}
+
+VkSemaphore HelloVulkan::createSemaphore() const
+{
+    const auto createInfo = VkSemaphoreCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
+    };
+    VkSemaphore semaphore = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateSemaphore(m_device, &createInfo, nullptr, &semaphore));
+    return semaphore;
+}
+
+int main()
+{
+    HelloVulkan app;
+    app.run();
 }
