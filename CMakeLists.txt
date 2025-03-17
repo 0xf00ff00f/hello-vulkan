@@ -6,11 +6,12 @@ set(CMAKE_CXX_MODULE_STD ON)
 project(hello)
 
 add_subdirectory(glfw)
+add_subdirectory(glm)
 add_subdirectory(VulkanMemoryAllocator)
 
 find_package(Vulkan REQUIRED)
 
 add_executable(hello main.cc)
-target_link_libraries(hello PUBLIC glfw Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator)
+target_link_libraries(hello PUBLIC glfw glm Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator)
 target_compile_features(hello PUBLIC cxx_std_23)
 set_target_properties(hello PROPERTIES CXX_STANDARD_REQUIRED ON)

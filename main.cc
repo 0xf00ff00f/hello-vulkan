@@ -4,6 +4,8 @@
 #define VMA_IMPLEMENTATION
 #include <vk_mem_alloc.h>
 
+#include <glm/glm.hpp>
+
 import std;
 
 #include <cassert>
@@ -46,11 +48,6 @@ public:
 private:
     static constexpr auto QueueSlotCount = 3;
 
-    struct DeviceMemory {
-        VkDeviceMemory memory = VK_NULL_HANDLE;
-        bool isHostCoherent = false;
-    };
-
     struct Buffer {
         VkBuffer buffer = VK_NULL_HANDLE;
         VmaAllocation allocation = VK_NULL_HANDLE;
@@ -73,7 +70,7 @@ private:
     VmaAllocator m_allocator = VK_NULL_HANDLE;
     VkQueue m_queue = VK_NULL_HANDLE;
     VkSurfaceKHR m_surface = VK_NULL_HANDLE;
-    VkSwapchainKHR m_swapchain;
+    VkSwapchainKHR m_swapchain = VK_NULL_HANDLE;
     VkExtent2D m_swapchainExtent = {};
     VkFormat m_swapchainFormat = VK_FORMAT_UNDEFINED;
     VkRenderPass m_renderPass = VK_NULL_HANDLE;
@@ -109,7 +106,8 @@ void HelloVulkan::initialize()
 
     // create instance
     m_instance = []() -> VkInstance {
-        const std::vector<const char *> instanceLayers = { "VK_LAYER_KHRONOS_validation" };
+        const auto instanceLayers = std::vector{ "VK_LAYER_KHRONOS_validation" };
+        static_assert(std::is_same_v<decltype(instanceLayers), const std::vector<const char *>>);
 
         uint32_t extensionCount = 0;
         const char **extensions = glfwGetRequiredInstanceExtensions(&extensionCount);
@@ -141,13 +139,14 @@ void HelloVulkan::initialize()
 
     // find physical device with graphics queue
     std::tie(m_physicalDevice, m_graphicsQueueIndex) = [this]() -> std::tuple<VkPhysicalDevice, uint32_t> {
-        uint32_t count = 0;
-        VK_CHECK(vkEnumeratePhysicalDevices(m_instance, &count, nullptr));
+        uint32_t physicalDeviceCount = 0;
+        VK_CHECK(vkEnumeratePhysicalDevices(m_instance, &physicalDeviceCount, nullptr));
 
-        std::vector<VkPhysicalDevice> physicalDevices(count);
-        VK_CHECK(vkEnumeratePhysicalDevices(m_instance, &count, physicalDevices.data()));
+        std::vector<VkPhysicalDevice> physicalDevices(physicalDeviceCount);
+        VK_CHECK(vkEnumeratePhysicalDevices(m_instance, &physicalDeviceCount, physicalDevices.data()));
 
         for (const auto &physicalDevice : physicalDevices) {
+            // ignore non-discrete GPUs for now
             const auto usable = [physicalDevice] {
                 VkPhysicalDeviceProperties properties = {};
                 vkGetPhysicalDeviceProperties(physicalDevice, &properties);
@@ -156,11 +155,12 @@ void HelloVulkan::initialize()
             if (!usable)
                 continue;
 
-            uint32_t count = 0;
-            vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &count, nullptr);
+            // does it have a graphics queue?
+            uint32_t queueFamilyCount = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
 
-            std::vector<VkQueueFamilyProperties> properties(count);
-            vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &count, properties.data());
+            std::vector<VkQueueFamilyProperties> properties(queueFamilyCount);
+            vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, properties.data());
 
             auto it = std::ranges::find_if(properties, [](const VkQueueFamilyProperties properties) {
                 return properties.queueFlags & VK_QUEUE_GRAPHICS_BIT;
@@ -179,7 +179,8 @@ void HelloVulkan::initialize()
 
     // create logical device
     m_device = [this]() -> VkDevice {
-        const std::vector<const char *> deviceExtensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+        const auto deviceExtensions = std::vector{ VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+        static_assert(std::is_same_v<decltype(deviceExtensions), const std::vector<const char *>>);
 
         const auto queuePriority = 1.0f;
 
@@ -385,14 +386,14 @@ void HelloVulkan::initialize()
     std::cout << "**** pipelineLayout=" << m_pipelineLayout << '\n';
 
     struct Vertex {
-        std::array<float, 2> position;
-        std::array<float, 3> color;
+        glm::vec2 position;
+        glm::vec3 color;
     };
     m_pipeline = [this]() -> VkPipeline {
-        auto vertShaderModule = createShaderModule("shaders/simple.vert.spv");
+        const auto vertShaderModule = createShaderModule("shaders/simple.vert.spv");
         std::cout << "**** vertShadeModule=" << vertShaderModule << '\n';
 
-        auto fragShaderModule = createShaderModule("shaders/simple.frag.spv");
+        const auto fragShaderModule = createShaderModule("shaders/simple.frag.spv");
         std::cout << "**** fragShaderModule=" << fragShaderModule << '\n';
 
         const auto shaderStages = std::array{
@@ -520,7 +521,6 @@ void HelloVulkan::initialize()
     };
 
     const auto verticesBytes = std::as_bytes(std::span{ vertices });
-
     m_vertexBuffer = allocateBuffer(verticesBytes.size(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
     vmaCopyMemoryToAllocation(m_allocator, verticesBytes.data(), m_vertexBuffer.allocation, 0, verticesBytes.size());
 
@@ -530,7 +530,6 @@ void HelloVulkan::initialize()
             .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
             .queueFamilyIndex = m_graphicsQueueIndex,
         };
-
         VkCommandPool commandPool = VK_NULL_HANDLE;
         VK_CHECK(vkCreateCommandPool(m_device, &createInfo, nullptr, &commandPool));
         return commandPool;
@@ -544,6 +543,7 @@ void HelloVulkan::initialize()
 
     m_imageAcquiredSemaphore = createSemaphore();
     std::cout << "**** imageAcquiredSemaphore=" << m_imageAcquiredSemaphore << '\n';
+
     m_renderingCompleteSemaphore = createSemaphore();
     std::cout << "**** renderingCompleteSemaphore=" << m_renderingCompleteSemaphore << '\n';
 }
