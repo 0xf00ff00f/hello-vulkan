@@ -5,6 +5,9 @@
 #include <vk_mem_alloc.h>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
 
 import std;
 
@@ -37,6 +40,13 @@ std::vector<char> readFile(const char *filename)
         }                                                        \
     } while (false)
 
+struct Buffer {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VmaAllocation allocation = VK_NULL_HANDLE;
+};
+
+class SpiralGeometry;
+
 class HelloVulkan
 {
 public:
@@ -45,22 +55,27 @@ public:
 
     void run();
 
+    Buffer allocateBuffer(VkDeviceSize size, VkBufferUsageFlagBits usage, const void *initialData = nullptr) const;
+    void destroyBuffer(const Buffer &buffer) const;
+
 private:
     static constexpr auto QueueSlotCount = 3;
 
-    struct Buffer {
-        VkBuffer buffer = VK_NULL_HANDLE;
-        VmaAllocation allocation = VK_NULL_HANDLE;
-    };
-
     void initialize();
     void cleanup();
+
+    struct EntityUniform {
+        glm::mat4 mvp;
+        glm::mat4 modelMatrix;
+        glm::vec4 texCoordOffset;
+        glm::vec4 globalLight;
+    };
+    static_assert(sizeof(EntityUniform) % sizeof(glm::vec4) == 0);
 
     VkShaderModule createShaderModule(const char *filename) const;
     VkCommandBuffer allocateCommandBuffer() const;
     VkFence createFence(bool createSignaled = true) const;
     VkSemaphore createSemaphore() const;
-    Buffer allocateBuffer(VkDeviceSize size, VkBufferUsageFlagBits usage) const;
 
     GLFWwindow *m_window = nullptr;
     VkInstance m_instance = VK_NULL_HANDLE;
@@ -80,7 +95,7 @@ private:
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
-    Buffer m_vertexBuffer;
+    std::unique_ptr<SpiralGeometry> m_geometry;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     Buffer m_uniformBuffer;
     VkDescriptorSet m_descriptorSet = VK_NULL_HANDLE;
@@ -89,6 +104,100 @@ private:
     VkFence m_inFlightFence = VK_NULL_HANDLE;
     VkSemaphore m_imageAcquiredSemaphore = VK_NULL_HANDLE;
     VkSemaphore m_renderingCompleteSemaphore = VK_NULL_HANDLE;
+};
+
+struct Vertex {
+    glm::vec3 position;
+    glm::vec3 normal;
+    glm::vec2 texCoord;
+};
+
+class SpiralGeometry
+{
+public:
+    explicit SpiralGeometry(HelloVulkan *app)
+        : m_app(app)
+    {
+        initializeGeometry();
+        initializeResources();
+    }
+
+    ~SpiralGeometry()
+    {
+        cleanup();
+    }
+
+    VkBuffer vertexBuffer() const { return m_vertexBuffer.buffer; }
+    VkBuffer indexBuffer() const { return m_indexBuffer.buffer; }
+    uint32_t indexCount() const { return m_indices.size(); }
+
+private:
+    void initializeGeometry()
+    {
+        constexpr auto Rings = 450;
+        constexpr auto Slices = 20;
+        constexpr auto Turns = 3.0;
+
+        for (int i = 0; i < Rings; ++i) {
+            const auto bigRadius = powf(1.0005, 10.5 * i) * i * 0.0001; // /* static_cast<float>(i) * 0.0048 */;
+            for (int j = 0; j < Slices; ++j) {
+                const auto smallRadius = bigRadius * .45; // /* sqrtf(static_cast<float>(i)) * */ i * 0.00025;
+
+                const auto phi = (static_cast<double>(i) / Rings) * 2.0 * M_PI * Turns;
+                const auto theta = (static_cast<double>(j) / Slices) * 2.0 * M_PI;
+
+                const auto r = glm::mat3(std::cos(phi), std::sin(phi), 0, -std::sin(phi), std::cos(phi), 0, 0, 0, 1);
+                const auto p = r * glm::vec3(0, bigRadius + smallRadius * std::cos(theta), smallRadius * std::sin(theta));
+                const auto o = r * glm::vec3(0, bigRadius, 0);
+
+                const auto uv = glm::vec2(static_cast<float>(i) / Rings, static_cast<float>(j) / Slices);
+
+                m_verts.emplace_back(p, glm::normalize(p - o), uv);
+            }
+        }
+
+        for (int i = 0; i < Rings - 1; ++i) {
+            for (int j = 0; j < Slices; ++j) {
+                const auto i0 = i * Slices + j;
+                const auto i1 = (i + 1) * Slices + j;
+                const auto i2 = (i + 1) * Slices + (j + 1) % Slices;
+                const auto i3 = i * Slices + (j + 1) % Slices;
+
+                m_indices.push_back(i0);
+                m_indices.push_back(i1);
+                m_indices.push_back(i2);
+
+                m_indices.push_back(i2);
+                m_indices.push_back(i3);
+                m_indices.push_back(i0);
+            }
+        }
+    }
+
+    void initializeResources()
+    {
+        const auto verticesBytes = std::as_bytes(std::span{ m_verts });
+        m_vertexBuffer = m_app->allocateBuffer(verticesBytes.size(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, verticesBytes.data());
+
+        const auto indexBytes = std::as_bytes(std::span{ m_indices });
+        m_indexBuffer = m_app->allocateBuffer(indexBytes.size(), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indexBytes.data());
+    }
+
+    void cleanup()
+    {
+        m_app->destroyBuffer(m_indexBuffer);
+        m_app->destroyBuffer(m_vertexBuffer);
+    }
+
+    HelloVulkan *m_app = nullptr;
+
+    std::vector<Vertex> m_verts;
+    std::vector<uint32_t> m_indices;
+
+    Buffer m_vertexBuffer;
+    Buffer m_indexBuffer;
+    VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_pipeline = VK_NULL_HANDLE;
 };
 
 HelloVulkan::HelloVulkan()
@@ -106,7 +215,7 @@ void HelloVulkan::initialize()
     glfwInit();
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    m_window = glfwCreateWindow(400, 400, "vulkan window", nullptr, nullptr);
+    m_window = glfwCreateWindow(800, 800, "vulkan window", nullptr, nullptr);
 
     // create instance
     m_instance = []() -> VkInstance {
@@ -383,7 +492,7 @@ void HelloVulkan::initialize()
         const auto layoutBinding = VkDescriptorSetLayoutBinding{
             .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .descriptorCount = 1,
-            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
         };
         const auto createInfo = VkDescriptorSetLayoutCreateInfo{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -408,15 +517,11 @@ void HelloVulkan::initialize()
     }();
     std::cout << "**** pipelineLayout=" << m_pipelineLayout << '\n';
 
-    struct Vertex {
-        glm::vec2 position;
-        glm::vec3 color;
-    };
     m_pipeline = [this]() -> VkPipeline {
-        const auto vertShaderModule = createShaderModule("shaders/simple.vert.spv");
+        const auto vertShaderModule = createShaderModule("shaders/spiral.vert.spv");
         std::cout << "**** vertShadeModule=" << vertShaderModule << '\n';
 
-        const auto fragShaderModule = createShaderModule("shaders/simple.frag.spv");
+        const auto fragShaderModule = createShaderModule("shaders/spiral.frag.spv");
         std::cout << "**** fragShaderModule=" << fragShaderModule << '\n';
 
         const auto shaderStages = std::array{
@@ -441,15 +546,20 @@ void HelloVulkan::initialize()
             VkVertexInputAttributeDescription{
                     .location = 0,
                     .binding = vertexBindingDescription.binding,
-                    .format = VK_FORMAT_R32G32_SFLOAT,
+                    .format = VK_FORMAT_R32G32B32_SFLOAT,
                     .offset = offsetof(Vertex, position) },
             VkVertexInputAttributeDescription{
                     .location = 1,
                     .binding = vertexBindingDescription.binding,
                     .format = VK_FORMAT_R32G32B32_SFLOAT,
-                    .offset = offsetof(Vertex, color) },
+                    .offset = offsetof(Vertex, normal) },
+            VkVertexInputAttributeDescription{
+                    .location = 2,
+                    .binding = vertexBindingDescription.binding,
+                    .format = VK_FORMAT_R32G32B32_SFLOAT,
+                    .offset = offsetof(Vertex, texCoord) },
         };
-        static_assert(std::is_same_v<decltype(vertexAttributeDescriptions), const std::array<VkVertexInputAttributeDescription, 2>>);
+        static_assert(std::is_same_v<decltype(vertexAttributeDescriptions), const std::array<VkVertexInputAttributeDescription, 3>>);
         const auto vertexInputState = VkPipelineVertexInputStateCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
             .vertexBindingDescriptionCount = 1,
@@ -484,7 +594,8 @@ void HelloVulkan::initialize()
         const auto rasterizationState = VkPipelineRasterizationStateCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             .depthClampEnable = VK_FALSE,
-            .lineWidth = 1.0f
+            .cullMode = VK_CULL_MODE_FRONT_BIT,
+            .lineWidth = 1.0f,
         };
         const auto multisampleState = VkPipelineMultisampleStateCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
@@ -537,15 +648,7 @@ void HelloVulkan::initialize()
     }();
     std::cout << "**** pipeline=" << m_pipeline << '\n';
 
-    const auto vertices = std::array<Vertex, 4>{
-        Vertex{ { 0.0, -0.5 }, { 1.0, 0.0, 0.0 } },
-        Vertex{ { 0.5, 0.5 }, { 0.0, 1.0, 0.0 } },
-        Vertex{ { -0.5, 0.5 }, { 0.0, 0.0, 1.0 } },
-    };
-
-    const auto verticesBytes = std::as_bytes(std::span{ vertices });
-    m_vertexBuffer = allocateBuffer(verticesBytes.size(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-    vmaCopyMemoryToAllocation(m_allocator, verticesBytes.data(), m_vertexBuffer.allocation, 0, verticesBytes.size());
+    m_geometry = std::make_unique<SpiralGeometry>(this);
 
     m_descriptorPool = [this]() -> VkDescriptorPool {
         const auto typeCount = VkDescriptorPoolSize{
@@ -564,7 +667,7 @@ void HelloVulkan::initialize()
     }();
     std::cout << "**** descriptorPool=" << m_descriptorPool << '\n';
 
-    m_uniformBuffer = allocateBuffer(sizeof(glm::vec4), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+    m_uniformBuffer = allocateBuffer(sizeof(EntityUniform), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 
     m_descriptorSet = [this]() -> VkDescriptorSet {
         const auto allocInfo = VkDescriptorSetAllocateInfo{
@@ -579,7 +682,7 @@ void HelloVulkan::initialize()
         const auto bufferInfo = VkDescriptorBufferInfo{
             .buffer = m_uniformBuffer.buffer,
             .offset = 0,
-            .range = sizeof(glm::vec4)
+            .range = sizeof(EntityUniform)
         };
         const auto writeDescriptorSet = VkWriteDescriptorSet{
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -629,10 +732,31 @@ void HelloVulkan::run()
         VK_CHECK(vkResetFences(m_device, 1, &m_inFlightFence));
 
         {
-            static float t = 0.0f;
-            const auto diffuseColor = glm::vec4(t);
-            vmaCopyMemoryToAllocation(m_allocator, &diffuseColor, m_uniformBuffer.allocation, 0, sizeof(diffuseColor));
-            t = std::fmod(t + 0.5f * 0.5f * 0.5f * 0.5f, 1.0f);
+            constexpr const auto CycleDuration = 3.f;
+            static float curTime = 0.0f;
+
+            const auto aspect = static_cast<float>(m_swapchainExtent.width) / m_swapchainExtent.height;
+            const auto projectionMatrix = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 100.f);
+            const auto viewPos = glm::vec3(0, -0.04, 0.3);
+            const auto viewUp = glm::vec3(0, 1, 0);
+            const auto viewMatrix = glm::lookAt(viewPos, glm::vec3(0, 0, 0), viewUp);
+
+            const float angle = curTime * 2.f * M_PI / CycleDuration;
+            const auto modelMatrix = glm::rotate(glm::mat4(1.0f), angle, glm::vec3(0, 0, 1));
+            const auto mvp = projectionMatrix * viewMatrix * modelMatrix;
+
+            const auto texOffset = static_cast<float>(curTime) / CycleDuration;
+
+            const auto uniform = EntityUniform{
+                .mvp = mvp,
+                // .normalMatrix = modelNormalMatrix,
+                .modelMatrix = modelMatrix * viewMatrix,
+                .texCoordOffset = glm::vec4{ -texOffset, texOffset, 0, 0 },
+                .globalLight = glm::vec4{ 5, 7, 5, 0 }
+            };
+            vmaCopyMemoryToAllocation(m_allocator, &uniform, m_uniformBuffer.allocation, 0, sizeof(uniform));
+
+            curTime += 0.01f;
         }
 
         uint32_t currentBackBuffer = uint32_t(-1);
@@ -645,7 +769,7 @@ void HelloVulkan::run()
         VK_CHECK(vkBeginCommandBuffer(m_commandBuffer, &beginInfo));
 
         const auto clearValue = VkClearValue{
-            .color = { 0.0f, 1.0f, 1.0f, 1.0f }
+            .color = { 0.0f, 0.0f, 0.0f, 1.0f }
         };
         const auto renderPassBeginInfo = VkRenderPassBeginInfo{
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -661,8 +785,10 @@ void HelloVulkan::run()
         vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
         vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
         VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(m_commandBuffer, 0, 1, &m_vertexBuffer.buffer, &offset);
-        vkCmdDraw(m_commandBuffer, 3, 1, 0, 0);
+        auto vertexBuffer = m_geometry->vertexBuffer();
+        vkCmdBindVertexBuffers(m_commandBuffer, 0, 1, &vertexBuffer, &offset);
+        vkCmdBindIndexBuffer(m_commandBuffer, m_geometry->indexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(m_commandBuffer, m_geometry->indexCount(), 1, 0, 0, 0);
         vkCmdEndRenderPass(m_commandBuffer);
 
         VK_CHECK(vkEndCommandBuffer(m_commandBuffer));
@@ -699,7 +825,7 @@ void HelloVulkan::cleanup()
     vkDestroySemaphore(m_device, m_renderingCompleteSemaphore, nullptr);
     vkDestroySemaphore(m_device, m_imageAcquiredSemaphore, nullptr);
     vkDestroyFence(m_device, m_inFlightFence, nullptr);
-    vmaDestroyBuffer(m_allocator, m_vertexBuffer.buffer, m_vertexBuffer.allocation);
+    m_geometry.reset();
     vkDestroyPipeline(m_device, m_pipeline, nullptr);
     vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
     vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
@@ -771,7 +897,7 @@ VkSemaphore HelloVulkan::createSemaphore() const
     return semaphore;
 }
 
-HelloVulkan::Buffer HelloVulkan::allocateBuffer(VkDeviceSize size, VkBufferUsageFlagBits usage) const
+Buffer HelloVulkan::allocateBuffer(VkDeviceSize size, VkBufferUsageFlagBits usage, const void *initialData) const
 {
     const auto bufferInfo = VkBufferCreateInfo{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -787,7 +913,17 @@ HelloVulkan::Buffer HelloVulkan::allocateBuffer(VkDeviceSize size, VkBufferUsage
     VkBuffer buffer = VK_NULL_HANDLE;
     VmaAllocation allocation = VK_NULL_HANDLE;
     VK_CHECK(vmaCreateBuffer(m_allocator, &bufferInfo, &allocInfo, &buffer, &allocation, nullptr));
+
+    if (initialData) {
+        vmaCopyMemoryToAllocation(m_allocator, initialData, allocation, 0, size);
+    }
+
     return { buffer, allocation };
+}
+
+void HelloVulkan::destroyBuffer(const Buffer &buffer) const
+{
+    vmaDestroyBuffer(m_allocator, buffer.buffer, buffer.allocation);
 }
 
 int main()
