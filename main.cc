@@ -77,9 +77,13 @@ private:
     std::vector<VkImage> m_swapchainImages;
     std::vector<VkImageView> m_swapchainImageViews;
     std::vector<VkFramebuffer> m_swapchainFramebuffers;
+    VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
     Buffer m_vertexBuffer;
+    VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
+    Buffer m_uniformBuffer;
+    VkDescriptorSet m_descriptorSet = VK_NULL_HANDLE;
     VkCommandPool m_commandPool = VK_NULL_HANDLE;
     VkCommandBuffer m_commandBuffer = VK_NULL_HANDLE;
     VkFence m_inFlightFence = VK_NULL_HANDLE;
@@ -375,9 +379,28 @@ void HelloVulkan::initialize()
                               }) |
             std::ranges::to<std::vector<VkFramebuffer>>();
 
+    m_descriptorSetLayout = [this]() -> VkDescriptorSetLayout {
+        const auto layoutBinding = VkDescriptorSetLayoutBinding{
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT
+        };
+        const auto createInfo = VkDescriptorSetLayoutCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .bindingCount = 1,
+            .pBindings = &layoutBinding
+        };
+        VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+        VK_CHECK(vkCreateDescriptorSetLayout(m_device, &createInfo, nullptr, &descriptorSetLayout));
+        return descriptorSetLayout;
+    }();
+    std::cout << "**** descriptorSetLayout=" << m_descriptorSetLayout << '\n';
+
     m_pipelineLayout = [this]() -> VkPipelineLayout {
         const auto createInfo = VkPipelineLayoutCreateInfo{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = 1,
+            .pSetLayouts = &m_descriptorSetLayout
         };
         VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
         VK_CHECK(vkCreatePipelineLayout(m_device, &createInfo, nullptr, &pipelineLayout));
@@ -524,6 +547,54 @@ void HelloVulkan::initialize()
     m_vertexBuffer = allocateBuffer(verticesBytes.size(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
     vmaCopyMemoryToAllocation(m_allocator, verticesBytes.data(), m_vertexBuffer.allocation, 0, verticesBytes.size());
 
+    m_descriptorPool = [this]() -> VkDescriptorPool {
+        const auto typeCount = VkDescriptorPoolSize{
+            .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+        };
+        const auto createInfo = VkDescriptorPoolCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            .maxSets = 1,
+            .poolSizeCount = 1,
+            .pPoolSizes = &typeCount
+        };
+        VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+        VK_CHECK(vkCreateDescriptorPool(m_device, &createInfo, nullptr, &descriptorPool));
+        return descriptorPool;
+    }();
+    std::cout << "**** descriptorPool=" << m_descriptorPool << '\n';
+
+    m_uniformBuffer = allocateBuffer(sizeof(glm::vec4), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+
+    m_descriptorSet = [this]() -> VkDescriptorSet {
+        const auto allocInfo = VkDescriptorSetAllocateInfo{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = m_descriptorPool,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &m_descriptorSetLayout
+        };
+        VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+        VK_CHECK(vkAllocateDescriptorSets(m_device, &allocInfo, &descriptorSet));
+
+        const auto bufferInfo = VkDescriptorBufferInfo{
+            .buffer = m_uniformBuffer.buffer,
+            .offset = 0,
+            .range = sizeof(glm::vec4)
+        };
+        const auto writeDescriptorSet = VkWriteDescriptorSet{
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = descriptorSet,
+            .dstBinding = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .pBufferInfo = &bufferInfo,
+        };
+        vkUpdateDescriptorSets(m_device, 1, &writeDescriptorSet, 0, nullptr);
+
+        return descriptorSet;
+    }();
+    std::cout << "**** descriptorSet=" << m_descriptorSet << '\n';
+
     m_commandPool = [this]() -> VkCommandPool {
         const auto createInfo = VkCommandPoolCreateInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -557,6 +628,13 @@ void HelloVulkan::run()
         VK_CHECK(vkWaitForFences(m_device, 1, &m_inFlightFence, VK_TRUE, UINT64_MAX));
         VK_CHECK(vkResetFences(m_device, 1, &m_inFlightFence));
 
+        {
+            static float t = 0.0f;
+            const auto diffuseColor = glm::vec4(t);
+            vmaCopyMemoryToAllocation(m_allocator, &diffuseColor, m_uniformBuffer.allocation, 0, sizeof(diffuseColor));
+            t = std::fmod(t + 0.5f * 0.5f * 0.5f * 0.5f, 1.0f);
+        }
+
         uint32_t currentBackBuffer = uint32_t(-1);
         VK_CHECK(vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX, m_imageAcquiredSemaphore, VK_NULL_HANDLE, &currentBackBuffer));
         std::cout << "**** after vkAcquireNextImageKHR currentBackBuffer=" << currentBackBuffer << '\n';
@@ -580,6 +658,7 @@ void HelloVulkan::run()
             .pClearValues = &clearValue,
         };
         vkCmdBeginRenderPass(m_commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
         vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
         VkDeviceSize offset = 0;
         vkCmdBindVertexBuffers(m_commandBuffer, 0, 1, &m_vertexBuffer.buffer, &offset);
@@ -623,6 +702,9 @@ void HelloVulkan::cleanup()
     vmaDestroyBuffer(m_allocator, m_vertexBuffer.buffer, m_vertexBuffer.allocation);
     vkDestroyPipeline(m_device, m_pipeline, nullptr);
     vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
+    vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
+    vmaDestroyBuffer(m_allocator, m_uniformBuffer.buffer, m_uniformBuffer.allocation);
+    vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
     vkDestroyCommandPool(m_device, m_commandPool, nullptr);
     for (auto framebuffer : m_swapchainFramebuffers)
         vkDestroyFramebuffer(m_device, framebuffer, nullptr);
